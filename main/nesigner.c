@@ -24,7 +24,7 @@
 static const char *TAG = "NESIGNER";
 
 // 消息结构：
-// | 2字节类型 | 16字节ID | 4字节长度头 | N字节加密数据 | 2字节CRC |
+// | 2字节类型 | 16字节ID | 32字节PUBKEY | 4字节长度头 | N字节加密数据 | 2字节CRC |
 
 // AES配置
 #define AES_KEY_SIZE 128
