@@ -8,11 +8,13 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "mbedtls/aes.h"
+#include "nostr.c"
 
 #define UART_PORT_NUM UART_NUM_0 // 使用 UART0（USB-JTAG/Serial 控制器）
 #define UART_BAUD_RATE 115200    // 波特率
 #define TYPE_SIZE 2              // 消息类型长度（固定 2 字节）
 #define ID_SIZE 16               // 消息 ID 长度（固定 16 字节）
+#define PUBKEY_SIZE 32           // 消息 PUBKEY 长度（固定 32 字节）
 #define HEADER_SIZE 4            // 消息头长度（固定 4 字节）
 #define MAX_MESSAGE_SIZE 1024    // 最大消息长度
 #define READ_TIMEOUT_MS 1000     // 读取超时时间（毫秒）
@@ -28,14 +30,6 @@ static const char *TAG = "NESIGNER";
 #define AES_KEY_SIZE 128
 static const uint8_t aes_key[] = "0123456789ABCDEF"; // 16字节密钥
 
-// 使用消息ID作为IV（必须保证是16字节）
-static void setup_iv(const char *message_id, uint8_t *iv)
-{
-    memcpy(iv, message_id, ID_SIZE);
-    // 如果ID_SIZE < 16需要填充，但这里ID_SIZE已经是16
-}
-
-// CRC16-CCITT配置
 uint16_t crc16(const uint8_t *data, size_t len)
 {
     uint16_t crc = 0xFFFF;
@@ -50,33 +44,34 @@ uint16_t crc16(const uint8_t *data, size_t len)
     return crc;
 }
 
-// AES加密（使用消息ID作为IV）
-void aes_encrypt(const uint8_t *input, uint8_t *output, size_t len, const char *message_id)
+// 修改为直接使用二进制IV
+void aes_encrypt(const uint8_t *input, uint8_t *output, size_t len, const uint8_t *iv)
 {
     mbedtls_aes_context aes;
-    uint8_t iv[16];
-    setup_iv(message_id, iv);
-
     mbedtls_aes_init(&aes);
     mbedtls_aes_setkey_enc(&aes, aes_key, AES_KEY_SIZE);
 
     size_t nc_off = 0;
     uint8_t stream_block[16];
-    mbedtls_aes_crypt_ctr(&aes, len, &nc_off, iv, stream_block, input, output);
+    uint8_t local_iv[16];
+    memcpy(local_iv, iv, 16); // 复制IV以防止修改原始数据
+
+    mbedtls_aes_crypt_ctr(&aes, len, &nc_off, local_iv, stream_block, input, output);
     mbedtls_aes_free(&aes);
 }
 
 // AES解密（使用消息ID作为IV）
-void aes_decrypt(const uint8_t *input, uint8_t *output, size_t len, const char *message_id)
+void aes_decrypt(const uint8_t *input, uint8_t *output, size_t len, const uint8_t *iv)
 {
-    aes_encrypt(input, output, len, message_id); // CTR模式解密相同
+    aes_encrypt(input, output, len, iv); // CTR模式解密相同
 }
 
 // 消息结构体
 typedef struct
 {
     int message_type;
-    char message_id[ID_SIZE + 1];
+    uint8_t message_id[ID_SIZE];
+    uint8_t pubkey[PUBKEY_SIZE];
     uint8_t *message;
     int message_len;
 } message_t;
@@ -84,7 +79,6 @@ typedef struct
 // 消息队列句柄
 QueueHandle_t message_queue;
 
-// 检查是否超时
 bool is_timeout(uint64_t start_time, uint64_t timeout_ms)
 {
     uint64_t current_time = esp_timer_get_time() / 1000; // 转换为毫秒
@@ -109,42 +103,37 @@ bool read_fixed_length_data(uint8_t *buffer, int length, uint64_t timeout_ms)
         // 检查是否超时
         if (is_timeout(start_time, timeout_ms))
         {
-            // ESP_LOGE(TAG, "Read timeout, expected %d bytes, received %d bytes", length, received);
             return false; // 读取超时
         }
     }
-
     return true; // 成功读取
 }
 
 // 发送响应消息
-void send_response(int message_type, const char *message_id, const uint8_t *message, int message_len)
+void send_response(int message_type, const uint8_t *message_id, const uint8_t *pubkey,
+                   const uint8_t *message, int message_len)
 {
-    // 加密数据
     uint8_t *encrypted = malloc(message_len);
     aes_encrypt(message, encrypted, message_len, message_id);
 
-    // 计算CRC
     uint16_t crc = crc16(encrypted, message_len);
     uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
 
-    // 构造消息头（加密数据+CRC的总长度）
-    uint32_t total_len = message_len + 2; // 加密数据长度 + CRC长度
-    uint8_t header[HEADER_SIZE];
-    header[0] = (total_len >> 24) & 0xFF;
-    header[1] = (total_len >> 16) & 0xFF;
-    header[2] = (total_len >> 8) & 0xFF;
-    header[3] = total_len & 0xFF;
+    uint32_t total_len = message_len + 2;
+    uint8_t header[HEADER_SIZE] = {
+        (total_len >> 24) & 0xFF,
+        (total_len >> 16) & 0xFF,
+        (total_len >> 8) & 0xFF,
+        total_len & 0xFF};
 
-    // 发送各字段
     uart_write_bytes(UART_PORT_NUM, (char *)&message_type, TYPE_SIZE);
-    uart_write_bytes(UART_PORT_NUM, message_id, ID_SIZE);
+    uart_write_bytes(UART_PORT_NUM, (char *)message_id, ID_SIZE); // 直接发送二进制ID
+    uart_write_bytes(UART_PORT_NUM, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
     uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE);
     uart_write_bytes(UART_PORT_NUM, (char *)encrypted, message_len);
     uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, 2);
 
     free(encrypted);
-    ESP_LOGI(TAG, "Sent response, ID: %s", message_id);
 }
 
 // 处理消息的 Task
@@ -155,8 +144,7 @@ void handle_message_task(void *pvParameters)
         message_t msg;
         if (xQueueReceive(message_queue, &msg, portMAX_DELAY))
         {
-            // 处理逻辑保持不变...
-            send_response(msg.message_type, msg.message_id, msg.message, msg.message_len);
+            send_response(msg.message_type, msg.message_id, msg.pubkey, msg.message, msg.message_len);
             free(msg.message);
         }
     }
@@ -192,10 +180,11 @@ void app_main(void)
     // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
     ESP_LOGI(TAG, "nesigner UART started");
 
-    uint8_t *type = (uint8_t *)malloc(TYPE_SIZE);           // 用于存储消息类型
-    uint8_t *id = (uint8_t *)malloc(ID_SIZE);               // 用于存储消息 ID
-    uint8_t *header = (uint8_t *)malloc(HEADER_SIZE);       // 用于存储消息头
-    uint8_t *message = (uint8_t *)malloc(MAX_MESSAGE_SIZE); // 用于存储消息体
+    uint8_t type[TYPE_SIZE];                     // 用于存储消息类型
+    uint8_t id[ID_SIZE];                         // 用于存储消息 ID
+    uint8_t pubkey[PUBKEY_SIZE];                 // 用于Pubkey
+    uint8_t header[HEADER_SIZE];                 // 用于存储消息头
+    uint8_t *message = malloc(MAX_MESSAGE_SIZE); // 用于存储消息体
 
     while (1)
     {
@@ -209,12 +198,13 @@ void app_main(void)
         type_str[TYPE_SIZE] = '\0';        // 添加字符串结束符
         int message_type = atoi(type_str); // 将消息类型转换为整数
 
-        // 读取16字节消息ID
+        // 直接读取二进制ID
         if (!read_fixed_length_data(id, ID_SIZE, READ_TIMEOUT_MS))
             continue;
-        char id_str[ID_SIZE + 1];
-        memcpy(id_str, id, ID_SIZE);
-        id_str[ID_SIZE] = '\0';
+
+        // 读取二进制pubkey
+        if (!read_fixed_length_data(pubkey, PUBKEY_SIZE, READ_TIMEOUT_MS))
+            continue;
 
         // 读取消息头
         if (!read_fixed_length_data(header, HEADER_SIZE, READ_TIMEOUT_MS))
@@ -235,20 +225,23 @@ void app_main(void)
         uint16_t received_crc = (encrypted_with_crc[total_len - 2] << 8) | encrypted_with_crc[total_len - 1];
         if (crc16(encrypted_with_crc, total_len - 2) != received_crc)
         {
-            ESP_LOGE(TAG, "CRC Error ID: %s", id_str);
+            char id_hex[ID_SIZE * 2 + 1];
+            bin_to_hex(id, ID_SIZE, id_hex);
+            ESP_LOGE(TAG, "CRC Error ID: %s", id_hex);
             free(encrypted_with_crc);
             continue;
         }
 
         // 解密数据（使用消息ID作为IV）
         uint8_t *decrypted = malloc(total_len - 2);
-        aes_decrypt(encrypted_with_crc, decrypted, total_len - 2, id_str);
+        aes_decrypt(encrypted_with_crc, decrypted, total_len - 2, id); // 直接使用二进制ID作为IV
 
         // 构造消息
         message_t msg = {
             .message_type = message_type,
             .message_len = total_len - 2};
-        strncpy(msg.message_id, id_str, ID_SIZE + 1);
+        memcpy(msg.message_id, id, ID_SIZE);
+        memcpy(msg.pubkey, pubkey, PUBKEY_SIZE);
         msg.message = decrypted;
 
         if (xQueueSend(message_queue, &msg, 0) != pdTRUE)
@@ -259,7 +252,6 @@ void app_main(void)
     }
 
     free(type);
-    free(id);
     free(header);
     free(message);
 }
