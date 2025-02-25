@@ -113,6 +113,9 @@ bool read_fixed_length_data(uint8_t *buffer, int length, uint64_t timeout_ms)
 void send_response(int message_type, const uint8_t *message_id, const uint8_t *pubkey,
                    const uint8_t *message, int message_len)
 {
+    uint8_t type_bin[TYPE_SIZE] = {(message_type >> 8) & 0xFF,
+                                   message_type & 0xFF};
+
     uint8_t *encrypted = malloc(message_len);
     aes_encrypt(message, encrypted, message_len, message_id);
 
@@ -126,7 +129,7 @@ void send_response(int message_type, const uint8_t *message_id, const uint8_t *p
         (total_len >> 8) & 0xFF,
         total_len & 0xFF};
 
-    uart_write_bytes(UART_PORT_NUM, (char *)&message_type, TYPE_SIZE);
+    uart_write_bytes(UART_PORT_NUM, (char *)&type_bin, TYPE_SIZE);
     uart_write_bytes(UART_PORT_NUM, (char *)message_id, ID_SIZE); // 直接发送二进制ID
     uart_write_bytes(UART_PORT_NUM, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
     uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE);
@@ -152,6 +155,9 @@ void handle_message_task(void *pvParameters)
 
 void app_main(void)
 {
+    // 关闭所有日志输出
+    esp_log_level_set("*", ESP_LOG_NONE);
+
     // 配置 UART
     uart_config_t uart_config = {
         .baud_rate = UART_BAUD_RATE,
@@ -193,10 +199,7 @@ void app_main(void)
             continue;
 
         // 解析消息类型
-        char type_str[TYPE_SIZE + 1];
-        memcpy(type_str, type, TYPE_SIZE);
-        type_str[TYPE_SIZE] = '\0';        // 添加字符串结束符
-        int message_type = atoi(type_str); // 将消息类型转换为整数
+        uint32_t message_type = (header[0] << 8) | header[1];
 
         // 直接读取二进制ID
         if (!read_fixed_length_data(id, ID_SIZE, READ_TIMEOUT_MS))
