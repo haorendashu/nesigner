@@ -10,7 +10,8 @@
 #include "mbedtls/aes.h"
 #include "nostr.c"
 
-#define UART_PORT_NUM UART_NUM_0 // 使用 UART0（USB-JTAG/Serial 控制器）
+// #define UART_PORT_NUM UART_NUM_0 // 使用 UART0（USB-JTAG/Serial 控制器）
+#define UART_PORT_NUM UART_NUM_2 // 使用 UART0（USB-JTAG/Serial 控制器）
 #define UART_BAUD_RATE 115200    // 波特率
 #define TYPE_SIZE 2              // 消息类型长度（固定 2 字节）
 #define ID_SIZE 16               // 消息 ID 长度（固定 16 字节）
@@ -69,7 +70,7 @@ void aes_decrypt(const uint8_t *input, uint8_t *output, size_t len, const uint8_
 // 消息结构体
 typedef struct
 {
-    int message_type;
+    uint16_t message_type;
     uint8_t message_id[ID_SIZE];
     uint8_t pubkey[PUBKEY_SIZE];
     uint8_t *message;
@@ -110,7 +111,7 @@ bool read_fixed_length_data(uint8_t *buffer, int length, uint64_t timeout_ms)
 }
 
 // 发送响应消息
-void send_response(int message_type, const uint8_t *message_id, const uint8_t *pubkey,
+void send_response(uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey,
                    const uint8_t *message, int message_len)
 {
     uint8_t type_bin[TYPE_SIZE] = {(message_type >> 8) & 0xFF,
@@ -156,7 +157,7 @@ void handle_message_task(void *pvParameters)
 void app_main(void)
 {
     // 关闭所有日志输出
-    esp_log_level_set("*", ESP_LOG_NONE);
+    // esp_log_level_set("*", ESP_LOG_NONE);
 
     // 配置 UART
     uart_config_t uart_config = {
@@ -169,6 +170,7 @@ void app_main(void)
     };
 
     // 安装 UART 驱动程序
+    ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, GPIO_NUM_4, GPIO_NUM_5, -1, -1));
     ESP_ERROR_CHECK(uart_driver_install(UART_PORT_NUM, MAX_MESSAGE_SIZE * 2, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));
 
@@ -199,7 +201,7 @@ void app_main(void)
             continue;
 
         // 解析消息类型
-        uint32_t message_type = (header[0] << 8) | header[1];
+        uint16_t message_type = (type[0] << 8) | type[1];
 
         // 直接读取二进制ID
         if (!read_fixed_length_data(id, ID_SIZE, READ_TIMEOUT_MS))
