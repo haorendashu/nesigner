@@ -28,8 +28,8 @@ static const char *TAG = "NESIGNER";
 // | 2字节类型 | 16字节ID | 32字节PUBKEY | 4字节长度头 | N字节加密数据 | 2字节CRC |
 
 // AES配置
-#define AES_KEY_SIZE 128
-static const uint8_t aes_key[] = "0123456789ABCDEF"; // 16字节密钥
+#define AES_KEY_SIZE 256
+static const uint8_t aes_key[] = "0123456789ABCDEF0123456789ABCDEF"; // 32字节密钥
 
 uint16_t crc16(const uint8_t *data, size_t len)
 {
