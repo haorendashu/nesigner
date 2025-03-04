@@ -8,7 +8,9 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "mbedtls/aes.h"
-#include "nostr.c"
+#include "msg_type.h"
+#include "nostr.h"
+#include "store.h"
 
 // #define UART_PORT_NUM UART_NUM_0 // 使用 UART0（USB-JTAG/Serial 控制器）
 #define UART_PORT_NUM UART_NUM_2 // 使用 UART0（USB-JTAG/Serial 控制器）
@@ -18,7 +20,7 @@
 #define PUBKEY_SIZE 32           // 消息 PUBKEY 长度（固定 32 字节）
 #define HEADER_SIZE 4            // 消息头长度（固定 4 字节）
 #define MAX_MESSAGE_SIZE 1024    // 最大消息长度
-#define READ_TIMEOUT_MS 1000     // 读取超时时间（毫秒）
+#define READ_TIMEOUT_MS 10000    // 读取超时时间（毫秒）
 #define TASK_STACK_SIZE 4096     // Task 栈大小
 #define QUEUE_SIZE 10            // 消息队列大小
 
@@ -154,6 +156,20 @@ void handle_message_task(void *pvParameters)
     }
 }
 
+// 以十进制形式打印字节数组
+// void printByteArrayAsDec(const char *arr, size_t len)
+// {
+//     for (size_t i = 0; i < len; i++)
+//     {
+//         printf("%u ", arr[i]);
+//         if ((i + 1) % 10 == 0)
+//         {
+//             printf("\n");
+//         }
+//     }
+//     printf("\n");
+// }
+
 void app_main(void)
 {
     // 关闭所有日志输出
@@ -188,11 +204,10 @@ void app_main(void)
     // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
     ESP_LOGI(TAG, "nesigner UART started");
 
-    uint8_t type[TYPE_SIZE];                     // 用于存储消息类型
-    uint8_t id[ID_SIZE];                         // 用于存储消息 ID
-    uint8_t pubkey[PUBKEY_SIZE];                 // 用于Pubkey
-    uint8_t header[HEADER_SIZE];                 // 用于存储消息头
-    uint8_t *message = malloc(MAX_MESSAGE_SIZE); // 用于存储消息体
+    uint8_t type[TYPE_SIZE];     // 用于存储消息类型
+    uint8_t id[ID_SIZE];         // 用于存储消息 ID
+    uint8_t pubkey[PUBKEY_SIZE]; // 用于Pubkey
+    uint8_t header[HEADER_SIZE]; // 用于存储消息头
 
     while (1)
     {
@@ -202,21 +217,29 @@ void app_main(void)
 
         // 解析消息类型
         uint16_t message_type = (type[0] << 8) | type[1];
+        ESP_LOGI(TAG, "message_type %d %d", type[0], type[1]);
 
         // 直接读取二进制ID
         if (!read_fixed_length_data(id, ID_SIZE, READ_TIMEOUT_MS))
             continue;
 
+        // printByteArrayAsDec((char *)id, ID_SIZE);
+
         // 读取二进制pubkey
         if (!read_fixed_length_data(pubkey, PUBKEY_SIZE, READ_TIMEOUT_MS))
             continue;
+
+        // printByteArrayAsDec((char *)pubkey, PUBKEY_SIZE);
 
         // 读取消息头
         if (!read_fixed_length_data(header, HEADER_SIZE, READ_TIMEOUT_MS))
             continue;
 
+        // printByteArrayAsDec((char *)header, HEADER_SIZE);
+
         // 解析消息头，获取消息长度
         uint32_t total_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
+        ESP_LOGI(TAG, "total_len %d %d %d %d %d", (int)total_len, header[0], header[1], header[2], header[3]);
 
         // 读取加密数据+CRC
         uint8_t *encrypted_with_crc = malloc(total_len);
@@ -257,6 +280,7 @@ void app_main(void)
     }
 
     free(type);
+    free(id);
+    free(pubkey);
     free(header);
-    free(message);
 }

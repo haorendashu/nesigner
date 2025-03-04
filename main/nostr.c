@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include "esp_log.h"
 #include "mbedtls/ecp.h"
 #include "mbedtls/bignum.h"
 #include "mbedtls/ctr_drbg.h"
