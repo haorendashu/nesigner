@@ -19,6 +19,7 @@
 #define ID_SIZE 16               // 消息 ID 长度（固定 16 字节）
 #define PUBKEY_SIZE 32           // 消息 PUBKEY 长度（固定 32 字节）
 #define IV_SIZE 16               // IV 长度（固定 16 字节）
+#define CRC_SIZE 2               // CRC长度（固定 2 字节）
 #define HEADER_SIZE 4            // 消息头长度（固定 4 字节）
 #define MAX_MESSAGE_SIZE 1024    // 最大消息长度
 #define READ_TIMEOUT_MS 10000    // 读取超时时间（毫秒）
@@ -28,7 +29,7 @@
 static const char *TAG = "NESIGNER";
 
 // 消息结构：
-// | 2字节类型 | 16字节ID | 32字节PUBKEY | 加密 IV | 4字节长度头 | N字节加密数据 | 2字节CRC |
+// | 2字节类型 | 16字节ID | 32字节PUBKEY | 加密 IV | 2字节CRC | 4字节长度头 | N字节加密数据 |
 
 // AES配置
 #define AES_KEY_SIZE 256
@@ -127,20 +128,19 @@ void send_response(uint16_t message_type, const uint8_t *message_id, const uint8
     uint16_t crc = crc16(encrypted, message_len);
     uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
 
-    uint32_t total_len = message_len + 2;
     uint8_t header[HEADER_SIZE] = {
-        (total_len >> 24) & 0xFF,
-        (total_len >> 16) & 0xFF,
-        (total_len >> 8) & 0xFF,
-        total_len & 0xFF};
+        (message_len >> 24) & 0xFF,
+        (message_len >> 16) & 0xFF,
+        (message_len >> 8) & 0xFF,
+        message_len & 0xFF};
 
     uart_write_bytes(UART_PORT_NUM, (char *)&type_bin, TYPE_SIZE);
     uart_write_bytes(UART_PORT_NUM, (char *)message_id, ID_SIZE); // 直接发送二进制ID
     uart_write_bytes(UART_PORT_NUM, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
     uart_write_bytes(UART_PORT_NUM, (char *)iv, IV_SIZE);         // 直接发送二进制IV
+    uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, 2);
     uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE);
     uart_write_bytes(UART_PORT_NUM, (char *)encrypted, message_len);
-    uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, 2);
 
     free(encrypted);
 }
@@ -211,6 +211,7 @@ void app_main(void)
     uint8_t id[ID_SIZE];         // 用于存储消息 ID
     uint8_t pubkey[PUBKEY_SIZE]; // 用于Pubkey
     uint8_t iv[IV_SIZE];         // 用于 IV
+    uint8_t crc[CRC_SIZE];       // 用于 CRC
     uint8_t header[HEADER_SIZE]; // 用于存储消息头
 
     while (1)
@@ -235,8 +236,12 @@ void app_main(void)
 
         // printByteArrayAsDec((char *)pubkey, PUBKEY_SIZE);
 
-        // 读取二进制pubkey
+        // 读取二进制iv
         if (!read_fixed_length_data(iv, IV_SIZE, READ_TIMEOUT_MS))
+            continue;
+
+        // 读取二进制crc
+        if (!read_fixed_length_data(crc, CRC_SIZE, READ_TIMEOUT_MS))
             continue;
 
         // 读取消息头
@@ -249,33 +254,33 @@ void app_main(void)
         uint32_t total_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
         ESP_LOGI(TAG, "total_len %d %d %d %d %d", (int)total_len, header[0], header[1], header[2], header[3]);
 
-        // 读取加密数据+CRC
-        uint8_t *encrypted_with_crc = malloc(total_len);
-        if (!read_fixed_length_data(encrypted_with_crc, total_len, READ_TIMEOUT_MS))
+        // 读取加密数据
+        uint8_t *encrypted = malloc(total_len);
+        if (!read_fixed_length_data(encrypted, total_len, READ_TIMEOUT_MS))
         {
-            free(encrypted_with_crc);
+            free(encrypted);
             continue;
         }
 
         // 验证CRC
-        uint16_t received_crc = (encrypted_with_crc[total_len - 2] << 8) | encrypted_with_crc[total_len - 1];
-        if (crc16(encrypted_with_crc, total_len - 2) != received_crc)
+        uint16_t received_crc = (crc[0] << 8) | crc[1];
+        if (crc16(encrypted, total_len) != received_crc)
         {
             char id_hex[ID_SIZE * 2 + 1];
             bin_to_hex(id, ID_SIZE, id_hex);
             ESP_LOGE(TAG, "CRC Error ID: %s", id_hex);
-            free(encrypted_with_crc);
+            free(encrypted);
             continue;
         }
 
         // 解密数据（使用消息ID作为IV）
-        uint8_t *decrypted = malloc(total_len - 2);
-        aes_decrypt(encrypted_with_crc, decrypted, total_len - 2, iv); // 直接使用二进制ID作为IV
+        uint8_t *decrypted = malloc(total_len);
+        aes_decrypt(encrypted, decrypted, total_len, iv); // 直接使用二进制ID作为IV
 
         // 构造消息
         message_t msg = {
             .message_type = message_type,
-            .message_len = total_len - 2};
+            .message_len = total_len};
         memcpy(msg.message_id, id, ID_SIZE);
         memcpy(msg.pubkey, pubkey, PUBKEY_SIZE);
         memcpy(msg.iv, iv, IV_SIZE);
@@ -285,7 +290,7 @@ void app_main(void)
         {
             free(decrypted);
         }
-        free(encrypted_with_crc);
+        free(encrypted);
     }
 
     free(type);
