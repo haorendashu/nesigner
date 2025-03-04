@@ -18,6 +18,7 @@
 #define TYPE_SIZE 2              // 消息类型长度（固定 2 字节）
 #define ID_SIZE 16               // 消息 ID 长度（固定 16 字节）
 #define PUBKEY_SIZE 32           // 消息 PUBKEY 长度（固定 32 字节）
+#define IV_SIZE 16               // IV 长度（固定 16 字节）
 #define HEADER_SIZE 4            // 消息头长度（固定 4 字节）
 #define MAX_MESSAGE_SIZE 1024    // 最大消息长度
 #define READ_TIMEOUT_MS 10000    // 读取超时时间（毫秒）
@@ -27,7 +28,7 @@
 static const char *TAG = "NESIGNER";
 
 // 消息结构：
-// | 2字节类型 | 16字节ID | 32字节PUBKEY | 4字节长度头 | N字节加密数据 | 2字节CRC |
+// | 2字节类型 | 16字节ID | 32字节PUBKEY | 加密 IV | 4字节长度头 | N字节加密数据 | 2字节CRC |
 
 // AES配置
 #define AES_KEY_SIZE 256
@@ -75,6 +76,7 @@ typedef struct
     uint16_t message_type;
     uint8_t message_id[ID_SIZE];
     uint8_t pubkey[PUBKEY_SIZE];
+    uint8_t iv[IV_SIZE];
     uint8_t *message;
     int message_len;
 } message_t;
@@ -113,14 +115,14 @@ bool read_fixed_length_data(uint8_t *buffer, int length, uint64_t timeout_ms)
 }
 
 // 发送响应消息
-void send_response(uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey,
+void send_response(uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
                    const uint8_t *message, int message_len)
 {
     uint8_t type_bin[TYPE_SIZE] = {(message_type >> 8) & 0xFF,
                                    message_type & 0xFF};
 
     uint8_t *encrypted = malloc(message_len);
-    aes_encrypt(message, encrypted, message_len, message_id);
+    aes_encrypt(message, encrypted, message_len, iv);
 
     uint16_t crc = crc16(encrypted, message_len);
     uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
@@ -135,6 +137,7 @@ void send_response(uint16_t message_type, const uint8_t *message_id, const uint8
     uart_write_bytes(UART_PORT_NUM, (char *)&type_bin, TYPE_SIZE);
     uart_write_bytes(UART_PORT_NUM, (char *)message_id, ID_SIZE); // 直接发送二进制ID
     uart_write_bytes(UART_PORT_NUM, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
+    uart_write_bytes(UART_PORT_NUM, (char *)iv, IV_SIZE);         // 直接发送二进制IV
     uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE);
     uart_write_bytes(UART_PORT_NUM, (char *)encrypted, message_len);
     uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, 2);
@@ -150,7 +153,7 @@ void handle_message_task(void *pvParameters)
         message_t msg;
         if (xQueueReceive(message_queue, &msg, portMAX_DELAY))
         {
-            send_response(msg.message_type, msg.message_id, msg.pubkey, msg.message, msg.message_len);
+            send_response(msg.message_type, msg.message_id, msg.pubkey, msg.iv, msg.message, msg.message_len);
             free(msg.message);
         }
     }
@@ -207,6 +210,7 @@ void app_main(void)
     uint8_t type[TYPE_SIZE];     // 用于存储消息类型
     uint8_t id[ID_SIZE];         // 用于存储消息 ID
     uint8_t pubkey[PUBKEY_SIZE]; // 用于Pubkey
+    uint8_t iv[IV_SIZE];         // 用于 IV
     uint8_t header[HEADER_SIZE]; // 用于存储消息头
 
     while (1)
@@ -230,6 +234,10 @@ void app_main(void)
             continue;
 
         // printByteArrayAsDec((char *)pubkey, PUBKEY_SIZE);
+
+        // 读取二进制pubkey
+        if (!read_fixed_length_data(iv, IV_SIZE, READ_TIMEOUT_MS))
+            continue;
 
         // 读取消息头
         if (!read_fixed_length_data(header, HEADER_SIZE, READ_TIMEOUT_MS))
@@ -262,7 +270,7 @@ void app_main(void)
 
         // 解密数据（使用消息ID作为IV）
         uint8_t *decrypted = malloc(total_len - 2);
-        aes_decrypt(encrypted_with_crc, decrypted, total_len - 2, id); // 直接使用二进制ID作为IV
+        aes_decrypt(encrypted_with_crc, decrypted, total_len - 2, iv); // 直接使用二进制ID作为IV
 
         // 构造消息
         message_t msg = {
@@ -270,6 +278,7 @@ void app_main(void)
             .message_len = total_len - 2};
         memcpy(msg.message_id, id, ID_SIZE);
         memcpy(msg.pubkey, pubkey, PUBKEY_SIZE);
+        memcpy(msg.iv, iv, IV_SIZE);
         msg.message = decrypted;
 
         if (xQueueSend(message_queue, &msg, 0) != pdTRUE)
