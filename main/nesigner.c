@@ -139,47 +139,35 @@ bool read_fixed_length_data(uint8_t *buffer, int length, uint64_t timeout_ms)
 void send_response(uint16_t message_result, uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
                    const uint8_t *message, int message_len)
 {
-    ESP_LOGI(TAG, "ECHO call ! 1");
     uint8_t type_bin[TYPE_SIZE] = {(message_type >> 8) & 0xFF,
                                    message_type & 0xFF};
 
-    ESP_LOGI(TAG, "ECHO call ! 2");
     uint8_t result_bin[RESULT_SIZE] = {(message_result >> 8) & 0xFF,
                                        message_result & 0xFF};
 
-    ESP_LOGI(TAG, "ECHO call ! 3");
     uint8_t header[HEADER_SIZE] = {
         (message_len >> 24) & 0xFF,
         (message_len >> 16) & 0xFF,
         (message_len >> 8) & 0xFF,
         message_len & 0xFF};
 
-    ESP_LOGI(TAG, "ECHO call ! 4");
     uart_write_bytes(UART_PORT_NUM, (char *)&type_bin, TYPE_SIZE);
     uart_write_bytes(UART_PORT_NUM, (char *)message_id, ID_SIZE); // 直接发送二进制ID
     uart_write_bytes(UART_PORT_NUM, (char *)&result_bin, RESULT_SIZE);
     uart_write_bytes(UART_PORT_NUM, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
     uart_write_bytes(UART_PORT_NUM, (char *)iv, IV_SIZE);         // 直接发送二进制IV
-    ESP_LOGI(TAG, "ECHO call ! 5");
     if (message_len > 0 && message != NULL)
     {
         uint16_t crc = crc16(message, message_len);
-        ESP_LOGI(TAG, "ECHO call ! 6");
         uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
-        ESP_LOGI(TAG, "ECHO call ! 7");
-        uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, 2); // crc
-        ESP_LOGI(TAG, "ECHO call ! 8");
-        uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE); // header
-        ESP_LOGI(TAG, "ECHO call ! 9");
+        uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, 2);         // crc
+        uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE);  // header
         uart_write_bytes(UART_PORT_NUM, (char *)message, message_len); // content
-        ESP_LOGI(TAG, "ECHO call ! 10");
     }
     else
     {
-        uart_write_bytes(UART_PORT_NUM, (char *){0, 0}, 2); // crc
-        ESP_LOGI(TAG, "ECHO call ! 66");
+        uart_write_bytes(UART_PORT_NUM, (char *){0, 0}, 2);           // crc
         uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE); // header
-        ESP_LOGI(TAG, "ECHO call ! 77");
     }
 }
 
@@ -218,7 +206,6 @@ void handle_message_task(void *pvParameters)
             }
             else if (msg.message_type == MSG_TYPE_ECHO)
             {
-                ESP_LOGI(TAG, "ECHO call !");
                 send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, msg.message, msg.message_len);
                 goto cleanup;
             }
