@@ -4,6 +4,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -11,11 +12,13 @@
 #include "msg_type.h"
 #include "nostr.h"
 #include "store.h"
+#include "msg_result.h"
 
 // #define UART_PORT_NUM UART_NUM_0 // 使用 UART0（USB-JTAG/Serial 控制器）
 #define UART_PORT_NUM UART_NUM_2 // 使用 UART0（USB-JTAG/Serial 控制器）
 #define UART_BAUD_RATE 115200    // 波特率
 #define TYPE_SIZE 2              // 消息类型长度（固定 2 字节）
+#define RESULT_SIZE 2            // 消息结果长度（固定 2 字节）（仅在result中有）
 #define ID_SIZE 16               // 消息 ID 长度（固定 16 字节）
 #define PUBKEY_SIZE 32           // 消息 PUBKEY 长度（固定 32 字节）
 #define IV_SIZE 16               // IV 长度（固定 16 字节）
@@ -28,14 +31,31 @@
 
 static const char *TAG = "NESIGNER";
 
-// 消息结构：
-// | 2字节类型 | 16字节ID | 32字节PUBKEY | 加密 IV | 2字节CRC | 4字节长度头 | N字节加密数据 |
+// Requst 消息结构：
+// | 2字节类型 | 16字节ID | 32字节PUBKEY | 16字节加密 IV | 2字节CRC | 4字节长度头 | N字节加密数据 |
+// Response 消息结构：
+// | 2字节类型 | 16字节ID | 2字节结果 | 32字节PUBKEY | 16字节加密 IV | 2字节CRC | 4字节长度头 | N字节加密数据 |
 
 // AES配置
 #define AES_KEY_SIZE 256
-static const uint8_t aes_key[] = "0123456789ABCDEF0123456789ABCDEF"; // 32字节密钥
+// static const uint8_t aes_key[] = "0123456789ABCDEF0123456789ABCDEF"; // 32字节密钥
 
-uint16_t crc16(const uint8_t *data, size_t len)
+// 生成随机 IV 的函数
+void generate_random_iv(uint8_t iv[IV_SIZE])
+{
+    for (int i = 0; i < IV_SIZE; i += 4)
+    {
+        // 生成 32 位随机数
+        uint32_t random_num = esp_random();
+        // 将 32 位随机数拆分成 4 个 8 位字节并存储到 IV 数组中
+        iv[i] = (random_num >> 24) & 0xFF;
+        iv[i + 1] = (random_num >> 16) & 0xFF;
+        iv[i + 2] = (random_num >> 8) & 0xFF;
+        iv[i + 3] = random_num & 0xFF;
+    }
+}
+
+uint16_t crc16(uint8_t *data, size_t len)
 {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < len; i++)
@@ -50,11 +70,11 @@ uint16_t crc16(const uint8_t *data, size_t len)
 }
 
 // 修改为直接使用二进制IV
-void aes_encrypt(const uint8_t *input, uint8_t *output, size_t len, const uint8_t *iv)
+void aes_encrypt(uint8_t *aesKey, uint8_t *input, uint8_t *output, size_t len, uint8_t *iv)
 {
     mbedtls_aes_context aes;
     mbedtls_aes_init(&aes);
-    mbedtls_aes_setkey_enc(&aes, aes_key, AES_KEY_SIZE);
+    mbedtls_aes_setkey_enc(&aes, aesKey, AES_KEY_SIZE);
 
     size_t nc_off = 0;
     uint8_t stream_block[16];
@@ -65,10 +85,10 @@ void aes_encrypt(const uint8_t *input, uint8_t *output, size_t len, const uint8_
     mbedtls_aes_free(&aes);
 }
 
-// AES解密（使用消息ID作为IV）
-void aes_decrypt(const uint8_t *input, uint8_t *output, size_t len, const uint8_t *iv)
+// AES解密
+void aes_decrypt(uint8_t *aesKey, const uint8_t *input, uint8_t *output, size_t len, const uint8_t *iv)
 {
-    aes_encrypt(input, output, len, iv); // CTR模式解密相同
+    aes_encrypt(aesKey, input, output, len, iv); // CTR模式解密相同
 }
 
 // 消息结构体
@@ -78,7 +98,7 @@ typedef struct
     uint8_t message_id[ID_SIZE];
     uint8_t pubkey[PUBKEY_SIZE];
     uint8_t iv[IV_SIZE];
-    uint8_t *message;
+    uint8_t *message; // encrypted message
     int message_len;
 } message_t;
 
@@ -116,33 +136,67 @@ bool read_fixed_length_data(uint8_t *buffer, int length, uint64_t timeout_ms)
 }
 
 // 发送响应消息
-void send_response(uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
+void send_response(uint16_t message_result, uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
                    const uint8_t *message, int message_len)
 {
+    ESP_LOGI(TAG, "ECHO call ! 1");
     uint8_t type_bin[TYPE_SIZE] = {(message_type >> 8) & 0xFF,
                                    message_type & 0xFF};
 
-    uint8_t *encrypted = malloc(message_len);
-    aes_encrypt(message, encrypted, message_len, iv);
+    ESP_LOGI(TAG, "ECHO call ! 2");
+    uint8_t result_bin[RESULT_SIZE] = {(message_result >> 8) & 0xFF,
+                                       message_result & 0xFF};
 
-    uint16_t crc = crc16(encrypted, message_len);
-    uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
-
+    ESP_LOGI(TAG, "ECHO call ! 3");
     uint8_t header[HEADER_SIZE] = {
         (message_len >> 24) & 0xFF,
         (message_len >> 16) & 0xFF,
         (message_len >> 8) & 0xFF,
         message_len & 0xFF};
 
+    ESP_LOGI(TAG, "ECHO call ! 4");
     uart_write_bytes(UART_PORT_NUM, (char *)&type_bin, TYPE_SIZE);
     uart_write_bytes(UART_PORT_NUM, (char *)message_id, ID_SIZE); // 直接发送二进制ID
+    uart_write_bytes(UART_PORT_NUM, (char *)&result_bin, RESULT_SIZE);
     uart_write_bytes(UART_PORT_NUM, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
     uart_write_bytes(UART_PORT_NUM, (char *)iv, IV_SIZE);         // 直接发送二进制IV
-    uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, 2);
-    uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE);
-    uart_write_bytes(UART_PORT_NUM, (char *)encrypted, message_len);
+    ESP_LOGI(TAG, "ECHO call ! 5");
+    if (message_len > 0 && message != NULL)
+    {
+        uint16_t crc = crc16(message, message_len);
+        ESP_LOGI(TAG, "ECHO call ! 6");
+        uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
+        ESP_LOGI(TAG, "ECHO call ! 7");
+        uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, 2); // crc
+        ESP_LOGI(TAG, "ECHO call ! 8");
+        uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE); // header
+        ESP_LOGI(TAG, "ECHO call ! 9");
+        uart_write_bytes(UART_PORT_NUM, (char *)message, message_len); // content
+        ESP_LOGI(TAG, "ECHO call ! 10");
+    }
+    else
+    {
+        uart_write_bytes(UART_PORT_NUM, (char *){0, 0}, 2); // crc
+        ESP_LOGI(TAG, "ECHO call ! 66");
+        uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE); // header
+        ESP_LOGI(TAG, "ECHO call ! 77");
+    }
+}
 
-    free(encrypted);
+void send_response_with_encrypt(uint8_t *aesKey, uint16_t message_result, uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
+                                const uint8_t *message, int message_len)
+{
+    if (message_len > 0 && aesKey != NULL)
+    {
+        uint8_t *encrypted = malloc(message_len);
+        aes_encrypt(aesKey, message, encrypted, message_len, iv);
+        send_response(message_result, message_type, message_id, pubkey, iv, encrypted, message_len);
+        free(encrypted);
+    }
+    else
+    {
+        send_response(message_result, message_type, message_id, pubkey, iv, message, message_len);
+    }
 }
 
 // 处理消息的 Task
@@ -153,7 +207,93 @@ void handle_message_task(void *pvParameters)
         message_t msg;
         if (xQueueReceive(message_queue, &msg, portMAX_DELAY))
         {
-            send_response(msg.message_type, msg.message_id, msg.pubkey, msg.iv, msg.message, msg.message_len);
+
+            uint8_t iv[IV_SIZE];
+            generate_random_iv(iv);
+
+            if (msg.message_type == MSG_TYPE_PING)
+            {
+                send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, msg.message, 0);
+                goto cleanup;
+            }
+            else if (msg.message_type == MSG_TYPE_ECHO)
+            {
+                ESP_LOGI(TAG, "ECHO call !");
+                send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, msg.message, msg.message_len);
+                goto cleanup;
+            }
+            else if (msg.message_type == MSG_TYPE_UPDATE_KEY)
+            {
+                goto cleanup;
+            }
+            else if (msg.message_type == MSG_TYPE_NOSTR_GET_PUBLIC_KEY)
+            {
+                // try to use keyparis to aes decrypt message
+                for (size_t i = 0; i < keypair_count; i++)
+                {
+                    KeyPair keypair = keypairs[i];
+                    uint8_t *decrypted = malloc(msg.message_len);
+                    aes_decrypt(keypair.aesKey, msg.message, decrypted, msg.message_len, msg.iv);
+
+                    if (memcmp(decrypted, msg.iv, IV_SIZE) == 0)
+                    {
+                        // If the decrypt content equal iv, find the aesKey!
+                        char pubkey_hex[64] = {0};
+                        bin_to_hex(keypair.pubkey, PUBKEY_LEN, pubkey_hex);
+
+                        send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, (const uint8_t *)pubkey_hex, 64);
+
+                        free(pubkey_hex);
+                        goto cleanup;
+                    }
+                }
+            }
+
+            KeyPair *keypair;
+
+            if (msg.message_len > 0)
+            {
+                keypair = findKeyPairByPubkey(msg.pubkey);
+                if (keypair == NULL)
+                {
+                    // TODO can't find the keypair,
+                    send_response(MSG_RESULT_KEY_NOT_FOUND, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+                    goto cleanup;
+                }
+            }
+            else
+            {
+                send_response(MSG_RESULT_CONTENT_NOT_ALLOW_EMPTY, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+                goto cleanup;
+            }
+
+            // 解密数据
+            uint8_t *decrypted = malloc(msg.message_len);
+            aes_decrypt(keypair->aesKey, msg.message, decrypted, msg.message_len, msg.iv); // 直接使用二进制ID作为IV
+
+            switch (msg.message_type)
+            {
+            case MSG_TYPE_REMOVE_KEY:
+                break;
+
+            case MSG_TYPE_NOSTR_SIGN_EVENT:
+                break;
+            case MSG_TYPE_NOSTR_NIP04_ENCRYPT:
+                break;
+            case MSG_TYPE_NOSTR_NIP04_DECRYPT:
+                break;
+            case MSG_TYPE_NOSTR_NIP44_ENCRYPT:
+                break;
+            case MSG_TYPE_NOSTR_NIP44_DECRYPT:
+                break;
+
+            default:
+                break;
+            }
+
+            free(decrypted);
+
+        cleanup:
             free(msg.message);
         }
     }
@@ -177,6 +317,8 @@ void app_main(void)
 {
     // 关闭所有日志输出
     // esp_log_level_set("*", ESP_LOG_NONE);
+
+    initStorage();
 
     // 配置 UART
     uart_config_t uart_config = {
@@ -273,10 +415,6 @@ void app_main(void)
             continue;
         }
 
-        // 解密数据（使用消息ID作为IV）
-        uint8_t *decrypted = malloc(total_len);
-        aes_decrypt(encrypted, decrypted, total_len, iv); // 直接使用二进制ID作为IV
-
         // 构造消息
         message_t msg = {
             .message_type = message_type,
@@ -284,11 +422,10 @@ void app_main(void)
         memcpy(msg.message_id, id, ID_SIZE);
         memcpy(msg.pubkey, pubkey, PUBKEY_SIZE);
         memcpy(msg.iv, iv, IV_SIZE);
-        msg.message = decrypted;
+        msg.message = encrypted;
 
         if (xQueueSend(message_queue, &msg, 0) != pdTRUE)
         {
-            free(decrypted);
         }
         free(encrypted);
     }

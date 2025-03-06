@@ -20,14 +20,14 @@ int hex_to_bin(const char *hex, uint8_t *bin, size_t bin_size);
 void bin_to_hex(const uint8_t *bin, size_t bin_size, char *hex);
 
 // 核心逻辑：私钥生成公钥
-int get_public(const char *privkey_hex, char *pubkey_hex);
+int get_public(const uint8_t *privkey_bin, uint8_t *pubkey_bin);
 
 // 计算 Nostr Event ID
 int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
                  cJSON *tags, const char *content, char *event_id_hex);
 
 // 签名函数
-int sign(const char *privkey_hex, const char *message_hex, char *sig_hex);
+int sign(const uint8_t *privkey_bin, const char *message_hex, char *sig_hex);
 
 // Base64 编码函数（使用mbedtls实现）
 char *base64_encode(const unsigned char *data, size_t input_length);
@@ -42,20 +42,20 @@ void pkcs7_pad(uint8_t *data, size_t data_len, size_t block_size);
 size_t pkcs7_unpad(uint8_t *data, size_t data_len, size_t block_size);
 
 // NIP04Encrypt 函数（修复内存泄漏和 IV 处理）
-int nip04_encrypt(const char *our_privkey_hex, const char *their_pubkey_hex, const char *text, char **encrypted_content);
+int nip04_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, const char *text, char **encrypted_content);
 
 // NIP04Decrypt 函数（修复 Base64 长度和内存泄漏）
-int nip04_decrypt(const char *our_privkey_hex, const char *their_pubkey_hex, const char *encrypted_content, char **decrypted_text);
+int nip04_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, const char *encrypted_content, char **decrypted_text);
 
 // 计算 HMAC-SHA256
 int hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len, uint8_t *output);
 
 // NIP44加密函数
-int nip44_encrypt(const char *our_privkey_hex, const char *their_pubkey_hex,
+int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
                   const char *text, char **encrypted_content);
 
 // NIP44解密函数
-int nip44_decrypt(const char *our_privkey_hex, const char *their_pubkey_hex,
+int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
                   const char *encrypted_content, char **decrypted_text);
 
 #endif

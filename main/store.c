@@ -9,25 +9,12 @@
 
 static const char *NVS_NAMESPACE = "keypair_store";
 
-static KeyPair *keypairs = NULL;
-static size_t keypair_count = 0;
+KeyPair *keypairs = NULL;
+size_t keypair_count = 0;
 
 /* 辅助函数 ------------------------------------------------------------*/
 
-// 验证HEX字符串格式
-static bool is_valid_hex(const char *str, size_t expect_len)
-{
-    if (strnlen(str, expect_len + 1) != expect_len)
-        return false;
-    for (size_t i = 0; i < expect_len; i++)
-    {
-        if (!isxdigit((unsigned char)str[i]))
-            return false;
-    }
-    return true;
-}
-
-// 安全保存到NVS
+// 保存函数
 static bool save_to_nvs()
 {
     nvs_handle_t handle;
@@ -36,8 +23,24 @@ static bool save_to_nvs()
         return false;
     }
 
-    esp_err_t err = nvs_set_blob(handle, "keypairs", keypairs,
+    // 转换为存储格式
+    StoredKeyPair *storage = malloc(keypair_count * sizeof(StoredKeyPair));
+    if (!storage)
+    {
+        nvs_close(handle);
+        return false;
+    }
+
+    for (size_t i = 0; i < keypair_count; i++)
+    {
+        memcpy(storage[i].aesKey, keypairs[i].aesKey, AES_KEY_LEN);
+        memcpy(storage[i].privateKey, keypairs[i].privateKey, PRIVATE_KEY_LEN);
+    }
+
+    esp_err_t err = nvs_set_blob(handle, "keypairs", storage,
                                  keypair_count * sizeof(StoredKeyPair));
+    free(storage);
+
     if (err != ESP_OK)
     {
         nvs_close(handle);
@@ -51,7 +54,7 @@ static bool save_to_nvs()
 
 /* 核心接口 ------------------------------------------------------------*/
 
-bool loadAll()
+bool loadAllKeyPairs()
 {
     nvs_handle_t handle;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
@@ -66,7 +69,6 @@ bool loadAll()
         return true;
     }
 
-    // 验证数据完整性
     if (required_size % sizeof(StoredKeyPair) != 0)
     {
         nvs_close(handle);
@@ -83,18 +85,17 @@ bool loadAll()
     nvs_close(handle);
 
     size_t count = required_size / sizeof(StoredKeyPair);
-    KeyPair *new_pairs = calloc(count, sizeof(KeyPair));
+    KeyPair *new_pairs = malloc(count * sizeof(KeyPair));
     if (!new_pairs)
     {
         free(storage);
         return false;
     }
 
-    // 转换存储格式并计算公钥
     for (size_t i = 0; i < count; i++)
     {
-        memcpy(new_pairs[i].aesKey, storage[i].aesKey, 33);
-        memcpy(new_pairs[i].privateKey, storage[i].privateKey, 65);
+        memcpy(new_pairs[i].aesKey, storage[i].aesKey, AES_KEY_LEN);
+        memcpy(new_pairs[i].privateKey, storage[i].privateKey, PRIVATE_KEY_LEN);
 
         if (get_public(new_pairs[i].privateKey, new_pairs[i].pubkey) != 0)
         {
@@ -111,26 +112,20 @@ bool loadAll()
     return true;
 }
 
-bool addAndSave(const KeyPair *pair)
+bool addAndSaveKeyPair(const KeyPair *pair)
 {
-    // 严格参数校验
-    if (!is_valid_hex(pair->aesKey, 32) ||
-        !is_valid_hex(pair->privateKey, 64) ||
-        strnlen(pair->aesKey, 33) != 32 ||
-        strnlen(pair->privateKey, 65) != 64)
-    {
+    // 简化参数校验（仅检查指针有效性）
+    if (!pair)
         return false;
-    }
 
     KeyPair *new_ptr = realloc(keypairs, (keypair_count + 1) * sizeof(KeyPair));
     if (!new_ptr)
         return false;
 
     keypairs = new_ptr;
-    memcpy(keypairs[keypair_count].aesKey, pair->aesKey, 33);
-    memcpy(keypairs[keypair_count].privateKey, pair->privateKey, 65);
+    memcpy(keypairs[keypair_count].aesKey, pair->aesKey, AES_KEY_LEN);
+    memcpy(keypairs[keypair_count].privateKey, pair->privateKey, PRIVATE_KEY_LEN);
 
-    // 计算公钥
     if (get_public(pair->privateKey, keypairs[keypair_count].pubkey) != 0)
     {
         return false;
@@ -140,16 +135,16 @@ bool addAndSave(const KeyPair *pair)
     return save_to_nvs();
 }
 
-bool removeAndSave(const char *aesKey)
+bool removeAndSaveKeyPair(const uint8_t *aesKey)
 {
-    if (!is_valid_hex(aesKey, 32))
+    if (!aesKey)
         return false;
 
     for (size_t i = 0; i < keypair_count; i++)
     {
-        if (memcmp(keypairs[i].aesKey, aesKey, 32) == 0)
+        if (memcmp(keypairs[i].aesKey, aesKey, AES_KEY_LEN) == 0)
         {
-            // 内存移动优化
+            // 移动剩余元素
             if (i < keypair_count - 1)
             {
                 memmove(&keypairs[i], &keypairs[i + 1],
@@ -157,8 +152,10 @@ bool removeAndSave(const char *aesKey)
             }
 
             KeyPair *new_ptr = realloc(keypairs, (keypair_count - 1) * sizeof(KeyPair));
-            if (keypair_count > 1 && !new_ptr)
+            if (!new_ptr && keypair_count > 1)
+            {
                 return false;
+            }
 
             keypairs = new_ptr;
             keypair_count--;
@@ -168,14 +165,14 @@ bool removeAndSave(const char *aesKey)
     return false;
 }
 
-const KeyPair *findByAesKey(const char *aesKey)
+KeyPair *findKeyPairByPubkey(const uint8_t *pubkey)
 {
-    if (!is_valid_hex(aesKey, 32))
+    if (!pubkey)
         return NULL;
 
     for (size_t i = 0; i < keypair_count; i++)
     {
-        if (memcmp(keypairs[i].aesKey, aesKey, 32) == 0)
+        if (memcmp(keypairs[i].pubkey, pubkey, PUBKEY_LEN) == 0)
         {
             return &keypairs[i];
         }
@@ -183,17 +180,12 @@ const KeyPair *findByAesKey(const char *aesKey)
     return NULL;
 }
 
-void init_storage()
+void initStorage()
 {
     esp_err_t ret = nvs_flash_init();
-    // if (ret == ESP_ERR_NVS_NO_FREE_PAGES)
-    // {
-    //     ESP_ERROR_CHECK(nvs_flash_erase());
-    //     ret = nvs_flash_init();
-    // }
     ESP_ERROR_CHECK(ret);
 
-    if (!loadAll())
+    if (!loadAllKeyPairs())
     {
         ESP_LOGE("STORAGE", "Failed to load keypairs");
     }

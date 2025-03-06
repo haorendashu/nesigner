@@ -1,0 +1,9 @@
+#ifndef MSG_RESULT_H
+#define MSG_RESULT_H
+
+#define MSG_RESULT_OK 0
+
+#define MSG_RESULT_KEY_NOT_FOUND 101
+#define MSG_RESULT_CONTENT_NOT_ALLOW_EMPTY 102
+
+#endif

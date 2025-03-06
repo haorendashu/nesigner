@@ -65,32 +65,24 @@ static int init_crypto_context(mbedtls_ecp_group *grp, mbedtls_ctr_drbg_context 
 }
 
 // 核心逻辑：私钥生成公钥
-int get_public(const char *privkey_hex, char *pubkey_hex)
+int get_public(const uint8_t *privkey_bin, uint8_t *pubkey_bin)
 {
     mbedtls_ecp_group grp;
     mbedtls_ecp_point pub;
     mbedtls_mpi d;
-    uint8_t privkey_bin[32];
-    uint8_t pubkey_bin[33]; // 压缩公钥需要33字节
     mbedtls_ctr_drbg_context ctr_drbg;
+    uint8_t temp_pubkey[33]; // 压缩公钥需要33字节
 
     if (init_crypto_context(&grp, &ctr_drbg) != 0)
-    {
         return -1;
-    }
 
     mbedtls_ecp_point_init(&pub);
     mbedtls_mpi_init(&d);
 
-    // 转换私钥
-    if (hex_to_bin(privkey_hex, privkey_bin, sizeof(privkey_bin)) != 0)
-    {
-        ESP_LOGE("Nostr", "Invalid private key hex");
-        goto cleanup;
-    }
-    mbedtls_mpi_read_binary(&d, privkey_bin, sizeof(privkey_bin));
+    // 直接读取二进制私钥
+    mbedtls_mpi_read_binary(&d, privkey_bin, 32);
 
-    // 计算公钥 Q = d * G（使用随机数生成器回调）
+    // 计算公钥 Q = d * G
     if (mbedtls_ecp_mul(&grp, &pub, &d, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg) != 0)
     {
         ESP_LOGE("Nostr", "ECP multiply failed");
@@ -100,19 +92,19 @@ int get_public(const char *privkey_hex, char *pubkey_hex)
     // 获取压缩格式的公钥（33字节）
     size_t olen;
     if (mbedtls_ecp_point_write_binary(&grp, &pub, MBEDTLS_ECP_PF_COMPRESSED,
-                                       &olen, pubkey_bin, sizeof(pubkey_bin)) != 0)
+                                       &olen, temp_pubkey, sizeof(temp_pubkey)) != 0)
     {
         ESP_LOGE("Nostr", "Failed to write public key");
         goto cleanup;
     }
 
     // 提取 x 坐标（跳过压缩标志字节）
-    if (olen != 33 || (pubkey_bin[0] != 0x02 && pubkey_bin[0] != 0x03))
+    if (olen != 33 || (temp_pubkey[0] != 0x02 && temp_pubkey[0] != 0x03))
     {
         ESP_LOGE("Nostr", "Unexpected public key format");
         goto cleanup;
     }
-    bin_to_hex(pubkey_bin + 1, 32, pubkey_hex);
+    memcpy(pubkey_bin, temp_pubkey + 1, 32);
 
 cleanup:
     mbedtls_ecp_group_free(&grp);
@@ -164,12 +156,12 @@ int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
 }
 
 // 签名函数
-int sign(const char *privkey_hex, const char *message_hex, char *sig_hex)
+int sign(const uint8_t *privkey_bin, const char *message_hex, char *sig_hex)
 {
     mbedtls_ecp_group grp;
     mbedtls_ecp_point r, pub;
     mbedtls_mpi d, k, e, s;
-    uint8_t privkey_bin[32], message_bin[32], sig_bin[64];
+    uint8_t message_bin[32], sig_bin[64];
     mbedtls_ctr_drbg_context ctr_drbg;
 
     if (init_crypto_context(&grp, &ctr_drbg) != 0)
@@ -184,12 +176,6 @@ int sign(const char *privkey_hex, const char *message_hex, char *sig_hex)
     mbedtls_mpi_init(&e);
     mbedtls_mpi_init(&s);
 
-    // 转换私钥和消息
-    if (hex_to_bin(privkey_hex, privkey_bin, sizeof(privkey_bin)) != 0)
-    {
-        ESP_LOGE("Nostr", "Invalid private key hex");
-        goto cleanup;
-    }
     if (hex_to_bin(message_hex, message_bin, sizeof(message_bin)) != 0)
     {
         ESP_LOGE("Nostr", "Invalid message hex");
@@ -263,7 +249,6 @@ int sign(const char *privkey_hex, const char *message_hex, char *sig_hex)
 
     // 转换为十六进制字符串
     bin_to_hex(sig_bin, sizeof(sig_bin), sig_hex);
-
 cleanup:
     mbedtls_ecp_group_free(&grp);
     mbedtls_ecp_point_free(&r);
@@ -329,12 +314,12 @@ unsigned char *base64_decode(const char *data, size_t input_length, size_t *outp
 }
 
 // 计算共享密钥
-static int compute_shared_secret(const char *our_privkey_hex, const char *their_pubkey_hex, uint8_t *shared_x)
+static int compute_shared_secret(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, uint8_t *shared_x)
 {
     mbedtls_ecp_group grp;
     mbedtls_ecp_point their_pub, shared_point;
     mbedtls_mpi our_priv;
-    uint8_t our_privkey_bin[32], their_pubkey_bin[33];
+    uint8_t temp_pubkey_bin[33];
     mbedtls_ctr_drbg_context ctr_drbg;
     int ret = -1;
 
@@ -347,16 +332,11 @@ static int compute_shared_secret(const char *our_privkey_hex, const char *their_
     mbedtls_ecp_point_init(&shared_point);
     mbedtls_mpi_init(&our_priv);
 
-    // 严格校验公钥格式
-    if (hex_to_bin(their_pubkey_hex, their_pubkey_bin + 1, 32) != 0)
-    {
-        ESP_LOGE("NIP44", "无效的公钥格式");
-        goto cleanup;
-    }
-    their_pubkey_bin[0] = 0x02; // 强制使用压缩格式
+    memcpy(temp_pubkey_bin + 1, their_pubkey_bin, 32);
+    temp_pubkey_bin[0] = 0x02; // 强制使用压缩格式
 
     // 解析公钥点
-    if (mbedtls_ecp_point_read_binary(&grp, &their_pub, their_pubkey_bin, sizeof(their_pubkey_bin)) != 0)
+    if (mbedtls_ecp_point_read_binary(&grp, &their_pub, temp_pubkey_bin, 33) != 0)
     {
         ESP_LOGE("NIP44", "公钥解析失败");
         goto cleanup;
@@ -369,13 +349,9 @@ static int compute_shared_secret(const char *our_privkey_hex, const char *their_
         goto cleanup;
     }
 
-    // 转换私钥
-    if (hex_to_bin(our_privkey_hex, our_privkey_bin, sizeof(our_privkey_bin)) != 0)
-    {
-        ESP_LOGE("NIP44", "无效的私钥格式");
-        goto cleanup;
-    }
-    mbedtls_mpi_read_binary(&our_priv, our_privkey_bin, sizeof(our_privkey_bin));
+    uint8_t our_privkey_bin_copy[32];
+    memcpy(our_privkey_bin_copy, our_privkey_bin, 32); // 拷贝，避免被修改
+    mbedtls_mpi_read_binary(&our_priv, our_privkey_bin_copy, 32);
 
     // 计算共享点
     if (mbedtls_ecp_mul(&grp, &shared_point, &our_priv, &their_pub, mbedtls_ctr_drbg_random, &ctr_drbg) != 0)
@@ -460,10 +436,11 @@ size_t pkcs7_unpad(uint8_t *data, size_t data_len, size_t block_size)
 }
 
 // NIP04Encrypt 函数（修复内存泄漏和 IV 处理）
-int nip04_encrypt(const char *our_privkey_hex, const char *their_pubkey_hex, const char *text, char **encrypted_content)
+int nip04_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, const char *text, char **encrypted_content)
 {
+
     uint8_t shared_x[32];
-    if (compute_shared_secret(our_privkey_hex, their_pubkey_hex, shared_x) != 0)
+    if (compute_shared_secret(our_privkey_bin, their_pubkey_bin, shared_x) != 0)
     {
         ESP_LOGE("NIP04", "Failed to compute shared secret");
         return -1;
@@ -572,10 +549,11 @@ int nip04_encrypt(const char *our_privkey_hex, const char *their_pubkey_hex, con
 }
 
 // NIP04Decrypt 函数（修复 Base64 长度和内存泄漏）
-int nip04_decrypt(const char *our_privkey_hex, const char *their_pubkey_hex, const char *encrypted_content, char **decrypted_text)
+int nip04_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, const char *encrypted_content, char **decrypted_text)
 {
+
     uint8_t shared_x[32];
-    if (compute_shared_secret(our_privkey_hex, their_pubkey_hex, shared_x) != 0)
+    if (compute_shared_secret(our_privkey_bin, their_pubkey_bin, shared_x) != 0)
     {
         ESP_LOGE("NIP04", "Shared secret computation failed");
         return -1;
@@ -838,9 +816,10 @@ int hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t 
 }
 
 // NIP44加密函数
-int nip44_encrypt(const char *our_privkey_hex, const char *their_pubkey_hex,
+int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
                   const char *text, char **encrypted_content)
 {
+
     uint8_t shared_x[32];
     uint8_t *cipher = NULL;
     uint8_t *payload = NULL;
@@ -856,7 +835,7 @@ int nip44_encrypt(const char *our_privkey_hex, const char *their_pubkey_hex,
     mbedtls_entropy_init(&entropy);
 
     // 1. Compute shared secret
-    if (compute_shared_secret(our_privkey_hex, their_pubkey_hex, shared_x) != 0)
+    if (compute_shared_secret(our_privkey_bin, their_pubkey_bin, shared_x) != 0)
     {
         ESP_LOGE("NIP44", "Shared secret computation failed");
         goto cleanup;
@@ -954,9 +933,10 @@ cleanup:
 }
 
 // NIP44解密函数
-int nip44_decrypt(const char *our_privkey_hex, const char *their_pubkey_hex,
+int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
                   const char *encrypted_content, char **decrypted_text)
 {
+
     uint8_t *payload = NULL;
     uint8_t *mac_input = NULL;
     mbedtls_chacha20_context ctx;
@@ -982,7 +962,7 @@ int nip44_decrypt(const char *our_privkey_hex, const char *their_pubkey_hex,
 
     // 3. Compute shared secret
     uint8_t shared_x[32];
-    if (compute_shared_secret(our_privkey_hex, their_pubkey_hex, shared_x) != 0)
+    if (compute_shared_secret(our_privkey_bin, their_pubkey_bin, shared_x) != 0)
     {
         ESP_LOGE("NIP44", "Shared secret computation failed");
         goto cleanup;
