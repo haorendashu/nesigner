@@ -13,6 +13,11 @@
 #include "mbedtls/base64.h"
 #include "cJSON.h"
 
+#define NOSTR_EVENT_ID_BIN_LEN 32
+#define NOSTR_EVENT_ID_HEX_LEN 64
+#define NOSTR_EVENT_SIG_BIN_LEN 64
+#define NOSTR_EVENT_SIG_HEX_LEN 128
+
 // 将16进制字符串转换为二进制
 int hex_to_bin(const char *hex, uint8_t *bin, size_t bin_size);
 
@@ -27,7 +32,7 @@ int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
                  cJSON *tags, const char *content, char *event_id_hex);
 
 // 签名函数
-int sign(const uint8_t *privkey_bin, const char *message_hex, char *sig_hex);
+int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bin);
 
 // Base64 编码函数（使用mbedtls实现）
 char *base64_encode(const unsigned char *data, size_t input_length);

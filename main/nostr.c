@@ -4,6 +4,7 @@
 #include "mbedtls/ecp.h"
 #include "mbedtls/bignum.h"
 #include "mbedtls/ctr_drbg.h"
+#include "mbedtls/chacha20.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/chachapoly.h"
@@ -156,12 +157,12 @@ int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
 }
 
 // 签名函数
-int sign(const uint8_t *privkey_bin, const char *message_hex, char *sig_hex)
+int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bin)
 {
     mbedtls_ecp_group grp;
     mbedtls_ecp_point r, pub;
     mbedtls_mpi d, k, e, s;
-    uint8_t message_bin[32], sig_bin[64];
+    // uint8_t message_bin[32], sig_bin[64];
     mbedtls_ctr_drbg_context ctr_drbg;
 
     if (init_crypto_context(&grp, &ctr_drbg) != 0)
@@ -176,11 +177,11 @@ int sign(const uint8_t *privkey_bin, const char *message_hex, char *sig_hex)
     mbedtls_mpi_init(&e);
     mbedtls_mpi_init(&s);
 
-    if (hex_to_bin(message_hex, message_bin, sizeof(message_bin)) != 0)
-    {
-        ESP_LOGE("Nostr", "Invalid message hex");
-        goto cleanup;
-    }
+    // if (hex_to_bin(message_hex, message_bin, sizeof(message_bin)) != 0)
+    // {
+    //     ESP_LOGE("Nostr", "Invalid message hex");
+    //     goto cleanup;
+    // }
     mbedtls_mpi_read_binary(&d, privkey_bin, sizeof(privkey_bin));
 
     // 生成随机数 k
@@ -247,8 +248,8 @@ int sign(const uint8_t *privkey_bin, const char *message_hex, char *sig_hex)
     memcpy(sig_bin, r_bin + 1, 32); // 跳过压缩标志字节
     mbedtls_mpi_write_binary(&s, sig_bin + 32, 32);
 
-    // 转换为十六进制字符串
-    bin_to_hex(sig_bin, sizeof(sig_bin), sig_hex);
+    // // 转换为十六进制字符串
+    // bin_to_hex(sig_bin, sizeof(sig_bin), sig_hex);
 cleanup:
     mbedtls_ecp_group_free(&grp);
     mbedtls_ecp_point_free(&r);

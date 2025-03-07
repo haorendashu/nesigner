@@ -211,6 +211,29 @@ void handle_message_task(void *pvParameters)
             }
             else if (msg.message_type == MSG_TYPE_UPDATE_KEY)
             {
+                if (msg.message_len < PRIVATE_KEY_LEN + AES_KEY_LEN)
+                {
+                    goto sendillegal;
+                }
+
+                uint8_t private_key_bin[PRIVATE_KEY_LEN];
+                uint8_t aes_key_bin[AES_KEY_LEN];
+                memcpy(private_key_bin, msg.message, PRIVATE_KEY_LEN);
+                memcpy(aes_key_bin, msg.message + PRIVATE_KEY_LEN, AES_KEY_LEN);
+
+                KeyPair *keyPair = {};
+                memcpy(keyPair->aesKey, aes_key_bin, AES_KEY_LEN);
+                memcpy(keyPair->privateKey, private_key_bin, PRIVATE_KEY_LEN);
+
+                if (addAndSaveKeyPair(keyPair))
+                {
+                    send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+                }
+                else
+                {
+                    goto sendfail;
+                }
+
                 goto cleanup;
             }
             else if (msg.message_type == MSG_TYPE_NOSTR_GET_PUBLIC_KEY)
@@ -231,7 +254,7 @@ void handle_message_task(void *pvParameters)
                         send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, (const uint8_t *)pubkey_hex, 64);
 
                         free(pubkey_hex);
-                        goto cleanup;
+                        goto sendfail;
                     }
                 }
             }
@@ -256,30 +279,128 @@ void handle_message_task(void *pvParameters)
 
             // 解密数据
             uint8_t *decrypted = malloc(msg.message_len);
-            aes_decrypt(keypair->aesKey, msg.message, decrypted, msg.message_len, msg.iv); // 直接使用二进制ID作为IV
+            aes_decrypt(keypair->aesKey, msg.message, decrypted, msg.message_len, msg.iv);
 
             switch (msg.message_type)
             {
             case MSG_TYPE_REMOVE_KEY:
+                if (memcmp(decrypted, msg.iv, IV_SIZE) == 0 && removeAndSaveKeyPair(keypair->aesKey))
+                {
+                    // If the decrypt content equal iv
+                    send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+                }
+                else
+                {
+                    goto sendfail;
+                }
                 break;
 
             case MSG_TYPE_NOSTR_SIGN_EVENT:
+                // get the event id and sign it
+                if (msg.message_len != NOSTR_EVENT_ID_BIN_LEN)
+                {
+                    goto sendillegal;
+                }
+
+                uint8_t event_id_bin[NOSTR_EVENT_ID_BIN_LEN], sig_bin[NOSTR_EVENT_SIG_BIN_LEN];
+
+                if (sign(keypair->privateKey, event_id_bin, sig_bin) != 0)
+                {
+                    goto sendfail;
+                }
+
+                send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, sig_bin, NOSTR_EVENT_SIG_BIN_LEN);
                 break;
             case MSG_TYPE_NOSTR_NIP04_ENCRYPT:
+            {
+                if (msg.message_len <= PUBKEY_LEN)
+                {
+                    goto sendillegal;
+                }
+
+                uint8_t their_pubkey_bin[PUBKEY_LEN];
+                memcpy(their_pubkey_bin, msg.message, PUBKEY_LEN);
+
+                char *result_content = NULL;
+                if (nip04_encrypt(keypair->privateKey, their_pubkey_bin, (char *)(msg.message + PUBKEY_LEN), &result_content) != 0)
+                {
+                    goto sendfail;
+                }
+
+                send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
                 break;
+            }
             case MSG_TYPE_NOSTR_NIP04_DECRYPT:
+            {
+                if (msg.message_len <= PUBKEY_LEN)
+                {
+                    goto sendillegal;
+                }
+
+                uint8_t their_pubkey_bin[PUBKEY_LEN];
+                memcpy(their_pubkey_bin, msg.message, PUBKEY_LEN);
+
+                char *result_content = NULL;
+                if (nip04_decrypt(keypair->privateKey, their_pubkey_bin, (char *)(msg.message + PUBKEY_LEN), &result_content) != 0)
+                {
+                    goto sendfail;
+                }
+
+                send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
                 break;
+            }
             case MSG_TYPE_NOSTR_NIP44_ENCRYPT:
+            {
+                if (msg.message_len <= PUBKEY_LEN)
+                {
+                    goto sendillegal;
+                }
+
+                uint8_t their_pubkey_bin[PUBKEY_LEN];
+                memcpy(their_pubkey_bin, msg.message, PUBKEY_LEN);
+
+                char *result_content = NULL;
+                if (nip44_encrypt(keypair->privateKey, their_pubkey_bin, (char *)(msg.message + PUBKEY_LEN), &result_content) != 0)
+                {
+                    goto sendfail;
+                }
+
+                send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
                 break;
+            }
             case MSG_TYPE_NOSTR_NIP44_DECRYPT:
+            {
+                if (msg.message_len <= PUBKEY_LEN)
+                {
+                    goto sendillegal;
+                }
+
+                uint8_t their_pubkey_bin[PUBKEY_LEN];
+                memcpy(their_pubkey_bin, msg.message, PUBKEY_LEN);
+
+                char *result_content = NULL;
+                if (nip44_decrypt(keypair->privateKey, their_pubkey_bin, (char *)(msg.message + PUBKEY_LEN), &result_content) != 0)
+                {
+                    goto sendfail;
+                }
+
+                send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
                 break;
+            }
 
             default:
                 break;
             }
 
             free(decrypted);
+            goto cleanup;
 
+        sendillegal:
+            send_response(MSG_RESULT_CONTENT_ILLEGAL, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+            goto cleanup;
+        sendfail:
+            send_response(MSG_RESULT_FAIL, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+            goto cleanup;
         cleanup:
             free(msg.message);
         }
