@@ -160,13 +160,14 @@ void send_response(uint16_t message_result, uint16_t message_type, const uint8_t
     {
         uint16_t crc = crc16(message, message_len);
         uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
-        uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, 2);         // crc
+        uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, CRC_SIZE);  // crc
         uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE);  // header
         uart_write_bytes(UART_PORT_NUM, (char *)message, message_len); // content
     }
     else
     {
-        uart_write_bytes(UART_PORT_NUM, (char *){0, 0}, 2);           // crc
+        char empty_crc[2] = {0};
+        uart_write_bytes(UART_PORT_NUM, empty_crc, CRC_SIZE);         // crc
         uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE); // header
     }
 }
@@ -221,7 +222,7 @@ void handle_message_task(void *pvParameters)
                 memcpy(private_key_bin, msg.message, PRIVATE_KEY_LEN);
                 memcpy(aes_key_bin, msg.message + PRIVATE_KEY_LEN, AES_KEY_LEN);
 
-                KeyPair *keyPair = {};
+                KeyPair *keyPair = malloc(sizeof(KeyPair));
                 memcpy(keyPair->aesKey, aes_key_bin, AES_KEY_LEN);
                 memcpy(keyPair->privateKey, private_key_bin, PRIVATE_KEY_LEN);
 
@@ -253,7 +254,6 @@ void handle_message_task(void *pvParameters)
 
                         send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, (const uint8_t *)pubkey_hex, 64);
 
-                        free(pubkey_hex);
                         goto sendfail;
                     }
                 }
@@ -291,6 +291,7 @@ void handle_message_task(void *pvParameters)
                 }
                 else
                 {
+                    free(decrypted);
                     goto sendfail;
                 }
                 break;
@@ -306,6 +307,7 @@ void handle_message_task(void *pvParameters)
 
                 if (sign(keypair->privateKey, event_id_bin, sig_bin) != 0)
                 {
+                    free(decrypted);
                     goto sendfail;
                 }
 
@@ -324,6 +326,7 @@ void handle_message_task(void *pvParameters)
                 char *result_content = NULL;
                 if (nip04_encrypt(keypair->privateKey, their_pubkey_bin, (char *)(msg.message + PUBKEY_LEN), &result_content) != 0)
                 {
+                    free(decrypted);
                     goto sendfail;
                 }
 
@@ -343,6 +346,7 @@ void handle_message_task(void *pvParameters)
                 char *result_content = NULL;
                 if (nip04_decrypt(keypair->privateKey, their_pubkey_bin, (char *)(msg.message + PUBKEY_LEN), &result_content) != 0)
                 {
+                    free(decrypted);
                     goto sendfail;
                 }
 
@@ -362,6 +366,7 @@ void handle_message_task(void *pvParameters)
                 char *result_content = NULL;
                 if (nip44_encrypt(keypair->privateKey, their_pubkey_bin, (char *)(msg.message + PUBKEY_LEN), &result_content) != 0)
                 {
+                    free(decrypted);
                     goto sendfail;
                 }
 
@@ -381,6 +386,7 @@ void handle_message_task(void *pvParameters)
                 char *result_content = NULL;
                 if (nip44_decrypt(keypair->privateKey, their_pubkey_bin, (char *)(msg.message + PUBKEY_LEN), &result_content) != 0)
                 {
+                    free(decrypted);
                     goto sendfail;
                 }
 
@@ -408,18 +414,18 @@ void handle_message_task(void *pvParameters)
 }
 
 // 以十进制形式打印字节数组
-// void printByteArrayAsDec(const char *arr, size_t len)
-// {
-//     for (size_t i = 0; i < len; i++)
-//     {
-//         printf("%u ", arr[i]);
-//         if ((i + 1) % 10 == 0)
-//         {
-//             printf("\n");
-//         }
-//     }
-//     printf("\n");
-// }
+void printByteArrayAsDec(const char *arr, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+    {
+        printf("%u ", arr[i]);
+        if ((i + 1) % 10 == 0)
+        {
+            printf("\n");
+        }
+    }
+    printf("\n");
+}
 
 void app_main(void)
 {
@@ -530,16 +536,9 @@ void app_main(void)
         memcpy(msg.message_id, id, ID_SIZE);
         memcpy(msg.pubkey, pubkey, PUBKEY_SIZE);
         memcpy(msg.iv, iv, IV_SIZE);
-        msg.message = encrypted;
-
-        if (xQueueSend(message_queue, &msg, 0) != pdTRUE)
-        {
-        }
+        msg.message = malloc(total_len);
+        memcpy(msg.message, encrypted, total_len);
+        xQueueSend(message_queue, &msg, 0);
         free(encrypted);
     }
-
-    free(type);
-    free(id);
-    free(pubkey);
-    free(header);
 }
