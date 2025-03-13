@@ -46,6 +46,22 @@ void pkcs7_pad(uint8_t *data, size_t data_len, size_t block_size);
 // PKCS#7 移除填充函数（严格验证所有填充字节）
 size_t pkcs7_unpad(uint8_t *data, size_t data_len, size_t block_size);
 
+int aes_cbc_encrypt(const uint8_t *key, size_t key_len, const uint8_t *iv,
+                    const uint8_t *input, size_t input_len,
+                    uint8_t **output);
+
+int aes_cbc_decrypt(const uint8_t *key, size_t key_len, const uint8_t *iv,
+                    const uint8_t *input, size_t input_len,
+                    uint8_t **output);
+
+int aes_encrypt_padded(const uint8_t *key, size_t key_len, const uint8_t *iv,
+                       const uint8_t *input, size_t input_len,
+                       uint8_t **output, size_t *output_len);
+
+int aes_decrypt_padded(const uint8_t *key, size_t key_len, const uint8_t *iv,
+                       const uint8_t *input, size_t input_len,
+                       uint8_t **output, size_t *output_len);
+
 // NIP04Encrypt 函数（修复内存泄漏和 IV 处理）
 int nip04_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, const char *text, char **encrypted_content);
 

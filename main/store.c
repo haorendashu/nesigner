@@ -103,6 +103,12 @@ bool loadAllKeyPairs()
             free(new_pairs);
             return false;
         }
+
+        // char pubkey_hex[PUBKEY_LEN * 2 + 1] = {0};
+        // bin_to_hex(new_pairs[i].pubkey, PUBKEY_LEN, pubkey_hex);
+        // char aeskey_hex[AES_KEY_LEN * 2 + 1] = {0};
+        // bin_to_hex(new_pairs[i].aesKey, AES_KEY_LEN, aeskey_hex);
+        // printf("Loaded Pubkey: %s %s \n", aeskey_hex, pubkey_hex);
     }
 
     free(keypairs);
@@ -114,25 +120,81 @@ bool loadAllKeyPairs()
 
 bool addAndSaveKeyPair(const KeyPair *pair)
 {
-    // 简化参数校验（仅检查指针有效性）
     if (!pair)
         return false;
 
-    KeyPair *new_ptr = realloc(keypairs, (keypair_count + 1) * sizeof(KeyPair));
-    if (!new_ptr)
-        return false;
+    // 检查是否已存在相同的 aesKey
+    for (size_t i = 0; i < keypair_count; i++)
+    {
+        if (memcmp(keypairs[i].aesKey, pair->aesKey, AES_KEY_LEN) == 0)
+        {
+            // 备份旧数据以便回滚
+            uint8_t old_private[PRIVATE_KEY_LEN];
+            uint8_t old_pubkey[PUBKEY_LEN];
+            memcpy(old_private, keypairs[i].privateKey, PRIVATE_KEY_LEN);
+            memcpy(old_pubkey, keypairs[i].pubkey, PUBKEY_LEN);
 
-    keypairs = new_ptr;
-    memcpy(keypairs[keypair_count].aesKey, pair->aesKey, AES_KEY_LEN);
-    memcpy(keypairs[keypair_count].privateKey, pair->privateKey, PRIVATE_KEY_LEN);
+            // 更新 privateKey
+            memcpy(keypairs[i].privateKey, pair->privateKey, PRIVATE_KEY_LEN);
 
-    if (get_public(pair->privateKey, keypairs[keypair_count].pubkey) != 0)
+            // 重新生成公钥
+            if (get_public(pair->privateKey, keypairs[i].pubkey) != 0)
+            {
+                // 生成失败，回滚旧数据
+                memcpy(keypairs[i].privateKey, old_private, PRIVATE_KEY_LEN);
+                memcpy(keypairs[i].pubkey, old_pubkey, PUBKEY_LEN);
+                return false;
+            }
+
+            // 保存到NVS
+            if (!save_to_nvs())
+            {
+                // 保存失败，回滚旧数据
+                memcpy(keypairs[i].privateKey, old_private, PRIVATE_KEY_LEN);
+                memcpy(keypairs[i].pubkey, old_pubkey, PUBKEY_LEN);
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    // 不存在则新增：先验证公私钥再分配内存
+    KeyPair new_entry;
+    memcpy(&new_entry, pair, sizeof(KeyPair));
+
+    // 预生成公钥
+    if (get_public(new_entry.privateKey, new_entry.pubkey) != 0)
     {
         return false;
     }
 
+    // 分配新内存
+    KeyPair *new_pairs = realloc(keypairs, (keypair_count + 1) * sizeof(KeyPair));
+    if (!new_pairs)
+    {
+        return false;
+    }
+
+    // 复制数据到新数组
+    keypairs = new_pairs;
+    memcpy(&keypairs[keypair_count], &new_entry, sizeof(KeyPair));
     keypair_count++;
-    return save_to_nvs();
+
+    // 持久化存储
+    if (!save_to_nvs())
+    {
+        // 存储失败，回滚内存
+        keypair_count--;
+        KeyPair *shrunk = realloc(keypairs, keypair_count * sizeof(KeyPair));
+        if (shrunk)
+        {
+            keypairs = shrunk;
+        }
+        return false;
+    }
+
+    return true;
 }
 
 bool removeAndSaveKeyPair(const uint8_t *aesKey)
@@ -144,22 +206,32 @@ bool removeAndSaveKeyPair(const uint8_t *aesKey)
     {
         if (memcmp(keypairs[i].aesKey, aesKey, AES_KEY_LEN) == 0)
         {
-            // 移动剩余元素
+            KeyPair *old_keypairs = keypairs;
+            size_t old_count = keypair_count;
+
             if (i < keypair_count - 1)
             {
-                memmove(&keypairs[i], &keypairs[i + 1],
-                        (keypair_count - i - 1) * sizeof(KeyPair));
+                memmove(&keypairs[i], &keypairs[i + 1], (keypair_count - i - 1) * sizeof(KeyPair));
             }
 
             KeyPair *new_ptr = realloc(keypairs, (keypair_count - 1) * sizeof(KeyPair));
-            if (!new_ptr && keypair_count > 1)
+            if (!new_ptr && (keypair_count > 1))
             {
-                return false;
+                return false; // 无法缩小内存，恢复原数组？
+                // 注意：此处memmove已破坏数据，无法完美恢复，建议用临时数组方式
             }
 
             keypairs = new_ptr;
             keypair_count--;
-            return save_to_nvs();
+
+            if (!save_to_nvs())
+            {
+                keypairs = old_keypairs;
+                keypair_count = old_count;
+                return false;
+            }
+
+            return true;
         }
     }
     return false;

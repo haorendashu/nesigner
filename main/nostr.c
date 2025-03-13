@@ -11,6 +11,7 @@
 #include "mbedtls/hkdf.h"
 #include "mbedtls/base64.h"
 #include "cJSON.h"
+#include "utils.h"
 
 // 将16进制字符串转换为二进制
 int hex_to_bin(const char *hex, uint8_t *bin, size_t bin_size)
@@ -436,6 +437,164 @@ size_t pkcs7_unpad(uint8_t *data, size_t data_len, size_t block_size)
     return data_len - padding_len;
 }
 
+static int get_aes_keybits(size_t key_len)
+{
+    switch (key_len)
+    {
+    case 16:
+        return 128; // AES-128
+    case 24:
+        return 192; // AES-192
+    case 32:
+        return 256; // AES-256
+    default:
+        return -1; // 无效长度
+    }
+}
+
+int aes_cbc_encrypt(const uint8_t *key, size_t key_len, const uint8_t *iv,
+                    const uint8_t *input, size_t input_len,
+                    uint8_t **output)
+{
+    const int keybits = get_aes_keybits(key_len);
+    if (keybits < 0)
+    {
+        ESP_LOGE("AES", "Invalid key length: %d bytes", key_len);
+        return -1;
+    }
+
+    mbedtls_aes_context aes_ctx;
+    mbedtls_aes_init(&aes_ctx);
+
+    // 设置加密密钥
+    if (mbedtls_aes_setkey_enc(&aes_ctx, key, keybits) != 0)
+    {
+        mbedtls_aes_free(&aes_ctx);
+        return -1;
+    }
+
+    // 分配输出缓冲区
+    *output = (uint8_t *)malloc(input_len);
+    if (*output == NULL)
+    {
+        mbedtls_aes_free(&aes_ctx);
+        return -1;
+    }
+
+    // 执行加密（注意需要复制 IV 防止被修改）
+    uint8_t iv_copy[16];
+    memcpy(iv_copy, iv, 16);
+    int ret = mbedtls_aes_crypt_cbc(&aes_ctx, MBEDTLS_AES_ENCRYPT,
+                                    input_len, iv_copy,
+                                    input, *output);
+    mbedtls_aes_free(&aes_ctx);
+    return ret;
+}
+
+int aes_cbc_decrypt(const uint8_t *key, size_t key_len, const uint8_t *iv,
+                    const uint8_t *input, size_t input_len,
+                    uint8_t **output)
+{
+    const int keybits = get_aes_keybits(key_len);
+    if (keybits < 0)
+    {
+        ESP_LOGE("AES", "Invalid key length: %d bytes", key_len);
+        return -1;
+    }
+
+    mbedtls_aes_context aes_ctx;
+    mbedtls_aes_init(&aes_ctx);
+
+    // 设置解密密钥
+    if (mbedtls_aes_setkey_dec(&aes_ctx, key, keybits) != 0)
+    {
+        mbedtls_aes_free(&aes_ctx);
+        return -1;
+    }
+
+    // 分配输出缓冲区
+    *output = (uint8_t *)malloc(input_len);
+    if (*output == NULL)
+    {
+        mbedtls_aes_free(&aes_ctx);
+        return -1;
+    }
+
+    // 执行解密（注意需要复制 IV 防止被修改）
+    uint8_t iv_copy[16];
+    memcpy(iv_copy, iv, 16);
+    int ret = mbedtls_aes_crypt_cbc(&aes_ctx, MBEDTLS_AES_DECRYPT,
+                                    input_len, iv_copy,
+                                    input, *output);
+    mbedtls_aes_free(&aes_ctx);
+    return ret;
+}
+
+int aes_encrypt_padded(const uint8_t *key, size_t key_len, const uint8_t *iv,
+                       const uint8_t *input, size_t input_len,
+                       uint8_t **output, size_t *output_len)
+{
+    // 计算填充后的长度
+    size_t padded_len = ((input_len / 16) + 1) * 16;
+
+    printf("padding info %d %d\n", input_len, padded_len);
+
+    // 分配并填充缓冲区
+    uint8_t *padded_input = malloc(padded_len);
+    if (!padded_input)
+    {
+        ESP_LOGE("AES", "Memory allocation failed for padded input");
+        return -1;
+    }
+    memcpy(padded_input, input, input_len);
+    pkcs7_pad(padded_input, input_len, 16);
+
+    // 执行加密
+    int ret = aes_cbc_encrypt(key, key_len, iv, padded_input, padded_len, output);
+    free(padded_input);
+
+    if (ret == 0)
+    {
+        *output_len = padded_len;
+    }
+    return ret;
+}
+
+// 新增的AES解密带去除填充函数
+int aes_decrypt_padded(const uint8_t *key, size_t key_len, const uint8_t *iv,
+                       const uint8_t *input, size_t input_len,
+                       uint8_t **output, size_t *output_len)
+{
+    // 执行解密
+    uint8_t *decrypted = NULL;
+    int ret = aes_cbc_decrypt(key, key_len, iv, input, input_len, &decrypted);
+    if (ret != 0)
+    {
+        return ret;
+    }
+
+    // 去除填充
+    size_t unpadded_len = pkcs7_unpad(decrypted, input_len, 16);
+    if (unpadded_len == 0)
+    {
+        free(decrypted);
+        return -1;
+    }
+
+    // 复制未填充数据到新缓冲区
+    *output = malloc(unpadded_len);
+    if (!*output)
+    {
+        free(decrypted);
+        return -1;
+    }
+    memcpy(*output, decrypted, unpadded_len);
+    *output_len = unpadded_len;
+    free(decrypted);
+
+    return 0;
+}
+
 // NIP04Encrypt 函数（修复内存泄漏和 IV 处理）
 int nip04_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, const char *text, char **encrypted_content)
 {
@@ -471,56 +630,17 @@ int nip04_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_entropy_free(&entropy);
 
-    // 初始化 AES 上下文
-    mbedtls_aes_context aes_ctx;
-    mbedtls_aes_init(&aes_ctx);
-    if (mbedtls_aes_setkey_enc(&aes_ctx, shared_x, 256) != 0)
-    {
-        ESP_LOGE("NIP04", "AES key setup failed");
-        mbedtls_aes_free(&aes_ctx);
-        return -1;
-    }
-
-    // 处理明文并填充
-    size_t text_len = strlen(text);
-    size_t padded_len = ((text_len + 15) / 16) * 16; // 强制对齐到 16 字节
-    uint8_t *padded_text = (uint8_t *)malloc(padded_len);
-    if (!padded_text)
-    {
-        ESP_LOGE("NIP04", "Memory allocation failed for padded text");
-        mbedtls_aes_free(&aes_ctx);
-        return -1;
-    }
-    memset(padded_text, 0, padded_len); // 显式初始化
-    memcpy(padded_text, text, text_len);
-    pkcs7_pad(padded_text, text_len, 16); // 应用修复后的填充
-
-    // 加密数据
-    uint8_t *encrypted_text = (uint8_t *)malloc(padded_len);
-    if (!encrypted_text)
-    {
-        ESP_LOGE("NIP04", "Memory allocation failed for encrypted text");
-        mbedtls_aes_free(&aes_ctx);
-        free(padded_text);
-        return -1;
-    }
-
-    uint8_t iv_copy[16];
-    memcpy(iv_copy, iv, 16); // 拷贝 IV，避免被 mbedtls_aes_crypt_cbc 修改
-    if (mbedtls_aes_crypt_cbc(&aes_ctx, MBEDTLS_AES_ENCRYPT, padded_len, iv_copy, padded_text, encrypted_text) != 0)
+    uint8_t *encrypted_text = NULL;
+    size_t encrypted_len;
+    if (aes_encrypt_padded(shared_x, 32, iv, (const uint8_t *)text, strlen(text),
+                           &encrypted_text, &encrypted_len) != 0)
     {
         ESP_LOGE("NIP04", "AES encryption failed");
-        mbedtls_aes_free(&aes_ctx);
-        free(padded_text);
-        free(encrypted_text);
         return -1;
     }
 
-    mbedtls_aes_free(&aes_ctx);
-    free(padded_text);
-
     // Base64 编码
-    char *encrypted_text_b64 = base64_encode(encrypted_text, padded_len);
+    char *encrypted_text_b64 = base64_encode(encrypted_text, encrypted_len);
     char *iv_b64 = base64_encode(iv, sizeof(iv));
     free(encrypted_text);
 
@@ -552,7 +672,6 @@ int nip04_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
 // NIP04Decrypt 函数（修复 Base64 长度和内存泄漏）
 int nip04_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, const char *encrypted_content, char **decrypted_text)
 {
-
     uint8_t shared_x[32];
     if (compute_shared_secret(our_privkey_bin, their_pubkey_bin, shared_x) != 0)
     {
@@ -601,64 +720,24 @@ int nip04_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
         return -1;
     }
 
-    // 初始化 AES 上下文
-    mbedtls_aes_context aes_ctx;
-    mbedtls_aes_init(&aes_ctx);
-    if (mbedtls_aes_setkey_dec(&aes_ctx, shared_x, 256) != 0)
-    {
-        ESP_LOGE("NIP04", "AES key setup failed");
-        mbedtls_aes_free(&aes_ctx);
-        free(encrypted_text);
-        free(iv);
-        return -1;
-    }
-
-    // 解密数据
-    uint8_t *decrypted_bytes = (uint8_t *)malloc(encrypted_text_len);
-    if (!decrypted_bytes)
-    {
-        ESP_LOGE("NIP04", "Memory allocation failed for decrypted bytes");
-        mbedtls_aes_free(&aes_ctx);
-        free(encrypted_text);
-        free(iv);
-        return -1;
-    }
-
-    uint8_t iv_copy[16];
-    memcpy(iv_copy, iv, 16); // 拷贝 IV，避免被 mbedtls_aes_crypt_cbc 修改
-    if (mbedtls_aes_crypt_cbc(&aes_ctx, MBEDTLS_AES_DECRYPT, encrypted_text_len, iv_copy, encrypted_text, decrypted_bytes) != 0)
+    uint8_t *decrypted_bytes = NULL;
+    size_t decrypted_len;
+    if (aes_decrypt_padded(shared_x, 32, iv, encrypted_text, encrypted_text_len,
+                           &decrypted_bytes, &decrypted_len) != 0)
     {
         ESP_LOGE("NIP04", "AES decryption failed");
-        mbedtls_aes_free(&aes_ctx);
         free(encrypted_text);
         free(iv);
-        free(decrypted_bytes);
         return -1;
     }
 
-    mbedtls_aes_free(&aes_ctx);
     free(encrypted_text);
     free(iv);
 
-    // 移除填充
-    size_t unpadded_len = pkcs7_unpad(decrypted_bytes, encrypted_text_len, 16);
-    if (unpadded_len == 0)
-    {
-        ESP_LOGE("NIP04", "PKCS#7 unpadding failed");
-        free(decrypted_bytes);
-        return -1;
-    }
-
-    // 复制解密后的文本
-    *decrypted_text = (char *)malloc(unpadded_len + 1);
-    if (!*decrypted_text)
-    {
-        ESP_LOGE("NIP04", "Memory allocation failed for decrypted text");
-        free(decrypted_bytes);
-        return -1;
-    }
-    memcpy(*decrypted_text, decrypted_bytes, unpadded_len);
-    (*decrypted_text)[unpadded_len] = '\0';
+    // 复制解密结果到输出缓冲区
+    *decrypted_text = malloc(decrypted_len + 1);
+    memcpy(*decrypted_text, decrypted_bytes, decrypted_len);
+    (*decrypted_text)[decrypted_len] = '\0';
     free(decrypted_bytes);
 
     return 0;
@@ -937,7 +1016,6 @@ cleanup:
 int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
                   const char *encrypted_content, char **decrypted_text)
 {
-
     uint8_t *payload = NULL;
     uint8_t *mac_input = NULL;
     mbedtls_chacha20_context ctx;

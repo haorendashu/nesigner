@@ -13,6 +13,7 @@
 #include "nostr.h"
 #include "store.h"
 #include "msg_result.h"
+#include "utils.h"
 
 // #define UART_PORT_NUM UART_NUM_0 // 使用 UART0（USB-JTAG/Serial 控制器）
 #define UART_PORT_NUM UART_NUM_2 // 使用 UART0（USB-JTAG/Serial 控制器）
@@ -69,27 +70,27 @@ uint16_t crc16(uint8_t *data, size_t len)
     return crc;
 }
 
-// 修改为直接使用二进制IV
-void aes_encrypt(uint8_t *aesKey, uint8_t *input, uint8_t *output, size_t len, uint8_t *iv)
-{
-    mbedtls_aes_context aes;
-    mbedtls_aes_init(&aes);
-    mbedtls_aes_setkey_enc(&aes, aesKey, AES_KEY_SIZE);
+// // AES 加密
+// void aes_encrypt(uint8_t *aesKey, uint8_t *input, uint8_t *output, size_t len, uint8_t *iv)
+// {
+//     mbedtls_aes_context aes;
+//     mbedtls_aes_init(&aes);
+//     mbedtls_aes_setkey_enc(&aes, aesKey, AES_KEY_SIZE);
 
-    size_t nc_off = 0;
-    uint8_t stream_block[16];
-    uint8_t local_iv[16];
-    memcpy(local_iv, iv, 16); // 复制IV以防止修改原始数据
+//     size_t nc_off = 0;
+//     uint8_t stream_block[16];
+//     uint8_t local_iv[16];
+//     memcpy(local_iv, iv, 16); // 复制IV以防止修改原始数据
 
-    mbedtls_aes_crypt_ctr(&aes, len, &nc_off, local_iv, stream_block, input, output);
-    mbedtls_aes_free(&aes);
-}
+//     mbedtls_aes_crypt_ctr(&aes, len, &nc_off, local_iv, stream_block, input, output);
+//     mbedtls_aes_free(&aes);
+// }
 
-// AES解密
-void aes_decrypt(uint8_t *aesKey, const uint8_t *input, uint8_t *output, size_t len, const uint8_t *iv)
-{
-    aes_encrypt(aesKey, input, output, len, iv); // CTR模式解密相同
-}
+// // AES解密
+// void aes_decrypt(uint8_t *aesKey, const uint8_t *input, uint8_t *output, size_t len, const uint8_t *iv)
+// {
+//     aes_encrypt(aesKey, input, output, len, iv); // CTR模式解密相同
+// }
 
 // 消息结构体
 typedef struct
@@ -177,9 +178,15 @@ void send_response_with_encrypt(uint8_t *aesKey, uint16_t message_result, uint16
 {
     if (message_len > 0 && aesKey != NULL)
     {
-        uint8_t *encrypted = malloc(message_len);
-        aes_encrypt(aesKey, message, encrypted, message_len, iv);
-        send_response(message_result, message_type, message_id, pubkey, iv, encrypted, message_len);
+        uint8_t *encrypted = NULL;
+        size_t encrypted_len;
+        if (aes_encrypt_padded(aesKey, 16, iv, message, message_len, &encrypted, &encrypted_len) != 0)
+        {
+            ESP_LOGE(TAG, "AES encryption failed");
+            return;
+        }
+
+        send_response(message_result, message_type, message_id, pubkey, iv, encrypted, encrypted_len);
         free(encrypted);
     }
     else
@@ -196,9 +203,12 @@ void handle_message_task(void *pvParameters)
         message_t msg;
         if (xQueueReceive(message_queue, &msg, portMAX_DELAY))
         {
+            ESP_LOGI(TAG, "msg received from queue");
 
             uint8_t iv[IV_SIZE];
             generate_random_iv(iv);
+
+            printf("message_type %d\n", msg.message_type);
 
             if (msg.message_type == MSG_TYPE_PING)
             {
@@ -239,24 +249,37 @@ void handle_message_task(void *pvParameters)
             }
             else if (msg.message_type == MSG_TYPE_NOSTR_GET_PUBLIC_KEY)
             {
+                printByteArrayAsDec((char *)msg.iv, IV_SIZE);
                 // try to use keyparis to aes decrypt message
                 for (size_t i = 0; i < keypair_count; i++)
                 {
+                    printf("GET PUBKEY: item %d\n", i);
                     KeyPair keypair = keypairs[i];
-                    uint8_t *decrypted = malloc(msg.message_len);
-                    aes_decrypt(keypair.aesKey, msg.message, decrypted, msg.message_len, msg.iv);
+                    uint8_t *decrypted = NULL;
+                    size_t decrypted_len;
+                    if (aes_decrypt_padded(keypair.aesKey, 16, msg.iv, msg.message, msg.message_len,
+                                           &decrypted, &decrypted_len) != 0)
+                    {
+                        ESP_LOGE("NIP04", "AES decryption failed");
+                        goto sendillegal;
+                    }
+                    printByteArrayAsDec((char *)decrypted, decrypted_len);
 
                     if (memcmp(decrypted, msg.iv, IV_SIZE) == 0)
                     {
                         // If the decrypt content equal iv, find the aesKey!
-                        char pubkey_hex[64] = {0};
+                        char pubkey_hex[PUBKEY_LEN * 2 + 1] = {0};
                         bin_to_hex(keypair.pubkey, PUBKEY_LEN, pubkey_hex);
 
-                        send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, (const uint8_t *)pubkey_hex, 64);
+                        printf("find key!\n");
 
-                        goto sendfail;
+                        send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, (const uint8_t *)pubkey_hex, PUBKEY_LEN * 2);
+                        free(decrypted);
+                        goto cleanup;
                     }
+                    free(decrypted);
                 }
+                goto cleanup;
             }
 
             KeyPair *keypair;
@@ -278,8 +301,14 @@ void handle_message_task(void *pvParameters)
             }
 
             // 解密数据
-            uint8_t *decrypted = malloc(msg.message_len);
-            aes_decrypt(keypair->aesKey, msg.message, decrypted, msg.message_len, msg.iv);
+            uint8_t *decrypted = NULL;
+            size_t decrypted_len;
+            if (aes_decrypt_padded(keypair->aesKey, 16, iv, msg.message, msg.message_len,
+                                   &decrypted, &decrypted_len) != 0)
+            {
+                ESP_LOGE("NIP04", "AES decryption failed");
+                goto sendillegal;
+            }
 
             switch (msg.message_type)
             {
@@ -409,22 +438,9 @@ void handle_message_task(void *pvParameters)
             goto cleanup;
         cleanup:
             free(msg.message);
+            printf("free message complete\n");
         }
     }
-}
-
-// 以十进制形式打印字节数组
-void printByteArrayAsDec(const char *arr, size_t len)
-{
-    for (size_t i = 0; i < len; i++)
-    {
-        printf("%u ", arr[i]);
-        if ((i + 1) % 10 == 0)
-        {
-            printf("\n");
-        }
-    }
-    printf("\n");
 }
 
 void app_main(void)
@@ -478,33 +494,37 @@ void app_main(void)
 
         // 解析消息类型
         uint16_t message_type = (type[0] << 8) | type[1];
-        ESP_LOGI(TAG, "message_type %d %d", type[0], type[1]);
+        ESP_LOGI(TAG, "message_type %d %d %d", message_type, type[0], type[1]);
 
         // 直接读取二进制ID
         if (!read_fixed_length_data(id, ID_SIZE, READ_TIMEOUT_MS))
             continue;
 
-        // printByteArrayAsDec((char *)id, ID_SIZE);
+        printByteArrayAsDec((char *)id, ID_SIZE);
 
         // 读取二进制pubkey
         if (!read_fixed_length_data(pubkey, PUBKEY_SIZE, READ_TIMEOUT_MS))
             continue;
 
-        // printByteArrayAsDec((char *)pubkey, PUBKEY_SIZE);
+        printByteArrayAsDec((char *)pubkey, PUBKEY_SIZE);
 
         // 读取二进制iv
         if (!read_fixed_length_data(iv, IV_SIZE, READ_TIMEOUT_MS))
             continue;
 
+        printByteArrayAsDec((char *)iv, IV_SIZE);
+
         // 读取二进制crc
         if (!read_fixed_length_data(crc, CRC_SIZE, READ_TIMEOUT_MS))
             continue;
+
+        printByteArrayAsDec((char *)crc, CRC_SIZE);
 
         // 读取消息头
         if (!read_fixed_length_data(header, HEADER_SIZE, READ_TIMEOUT_MS))
             continue;
 
-        // printByteArrayAsDec((char *)header, HEADER_SIZE);
+        printByteArrayAsDec((char *)header, HEADER_SIZE);
 
         // 解析消息头，获取消息长度
         uint32_t total_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
@@ -540,5 +560,7 @@ void app_main(void)
         memcpy(msg.message, encrypted, total_len);
         xQueueSend(message_queue, &msg, 0);
         free(encrypted);
+
+        ESP_LOGI(TAG, "msg sended to queue");
     }
 }
