@@ -268,12 +268,9 @@ void handle_message_task(void *pvParameters)
                     if (memcmp(decrypted, msg.iv, IV_SIZE) == 0)
                     {
                         // If the decrypt content equal iv, find the aesKey!
-                        char pubkey_hex[PUBKEY_LEN * 2 + 1] = {0};
-                        bin_to_hex(keypair.pubkey, PUBKEY_LEN, pubkey_hex);
-
                         printf("find key!\n");
 
-                        send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, (const uint8_t *)pubkey_hex, PUBKEY_LEN * 2);
+                        send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, keypair.pubkey, PUBKEY_LEN);
                         free(decrypted);
                         goto cleanup;
                     }
