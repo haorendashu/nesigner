@@ -537,7 +537,7 @@ int aes_encrypt_padded(const uint8_t *key, size_t key_len, const uint8_t *iv,
     // 计算填充后的长度
     size_t padded_len = ((input_len / 16) + 1) * 16;
 
-    printf("padding info %d %d\n", input_len, padded_len);
+    // printf("padding info %d %d\n", input_len, padded_len);
 
     // 分配并填充缓冲区
     uint8_t *padded_input = malloc(padded_len);

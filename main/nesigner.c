@@ -232,6 +232,15 @@ void handle_message_task(void *pvParameters)
                 memcpy(private_key_bin, msg.message, PRIVATE_KEY_LEN);
                 memcpy(aes_key_bin, msg.message + PRIVATE_KEY_LEN, AES_KEY_LEN);
 
+                // char private_key_hex[PRIVATE_KEY_LEN * 2 + 1] = {};
+                // private_key_hex[PRIVATE_KEY_LEN * 2] = 0;
+                // bin_to_hex(private_key_bin, PRIVATE_KEY_LEN, private_key_hex);
+                // char aes_key_hex[AES_KEY_LEN * 2 + 1] = {};
+                // aes_key_hex[AES_KEY_LEN * 2] = 0;
+                // bin_to_hex(aes_key_bin, AES_KEY_LEN, aes_key_hex);
+
+                // ESP_LOGI("Test", "private_key_hex %s aes_key_hex %s", private_key_hex, aes_key_hex);
+
                 KeyPair *keyPair = malloc(sizeof(KeyPair));
                 memcpy(keyPair->aesKey, aes_key_bin, AES_KEY_LEN);
                 memcpy(keyPair->privateKey, private_key_bin, PRIVATE_KEY_LEN);
@@ -270,6 +279,11 @@ void handle_message_task(void *pvParameters)
                         // If the decrypt content equal iv, find the aesKey!
                         printf("find key!\n");
 
+                        // char pubkey_hex[PUBKEY_LEN * 2 + 1] = {};
+                        // pubkey_hex[PUBKEY_LEN * 2] = 0;
+                        // bin_to_hex(keypair.pubkey, PUBKEY_LEN, pubkey_hex);
+                        // ESP_LOGI("Test", "pubkey_hex %s", pubkey_hex);
+
                         send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, keypair.pubkey, PUBKEY_LEN);
                         free(decrypted);
                         goto cleanup;
@@ -286,7 +300,7 @@ void handle_message_task(void *pvParameters)
                 keypair = findKeyPairByPubkey(msg.pubkey);
                 if (keypair == NULL)
                 {
-                    // TODO can't find the keypair,
+                    // can't find the keypair,
                     send_response(MSG_RESULT_KEY_NOT_FOUND, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
                     goto cleanup;
                 }
@@ -446,6 +460,42 @@ void app_main(void)
     // esp_log_level_set("*", ESP_LOG_NONE);
 
     initStorage();
+
+    // {
+    //     uint8_t iv[IV_SIZE];
+    //     generate_random_iv(iv);
+    //     char iv_hex[IV_SIZE * 2] = {0};
+    //     bin_to_hex(iv, IV_SIZE, iv_hex);
+    //     ESP_LOGI("Test", "ivhex %s", iv_hex);
+
+    //     char *TEST_TEXT = "Hello, Nostr! This is a test message.";
+
+    //     uint8_t *encrypted_bytes = NULL;
+    //     size_t encrypted_len;
+    //     if (aes_encrypt_padded(keypairs[0].aesKey, 16, iv, (const uint8_t *)TEST_TEXT, strlen(TEST_TEXT),
+    //                            &encrypted_bytes, &encrypted_len) != 0)
+    //     {
+    //         ESP_LOGE("Test", "AES encryption failed");
+    //         return;
+    //     }
+    //     char encrypted_text[encrypted_len * 2 + 1] = {};
+    //     bin_to_hex(encrypted_bytes, encrypted_len, encrypted_text);
+    //     encrypted_text[encrypted_len * 2] = 0;
+    //     ESP_LOGI("Test", "Encrypted content hex: %s", encrypted_text);
+
+    //     uint8_t *decrypted_bytes = NULL;
+    //     size_t decrypted_len;
+    //     if (aes_decrypt_padded(keypairs[0].aesKey, 16, iv, encrypted_bytes, encrypted_len,
+    //                            &decrypted_bytes, &decrypted_len) != 0)
+    //     {
+    //         ESP_LOGE("Test", "AES decryption failed");
+    //         return;
+    //     }
+    //     char decrypted_text[decrypted_len + 1] = {};
+    //     memcpy(decrypted_text, decrypted_bytes, decrypted_len);
+    //     decrypted_text[decrypted_len] = 0;
+    //     ESP_LOGI("Test", "Decrypt content: %s %d", decrypted_text, decrypted_len);
+    // }
 
     // 配置 UART
     uart_config_t uart_config = {
