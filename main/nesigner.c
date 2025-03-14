@@ -321,29 +321,16 @@ void handle_message_task(void *pvParameters)
                 goto sendillegal;
             }
 
-            if (msg.message_type == MSG_TYPE_REMOVE_KEY)
+            if (msg.message_type == MSG_TYPE_NOSTR_SIGN_EVENT)
             {
-                if (memcmp(decrypted, msg.iv, IV_SIZE) == 0 && removeAndSaveKeyPair(keypair->aesKey))
-                {
-                    // If the decrypt content equal iv
-                    send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
-                }
-                else
-                {
-                    free(decrypted);
-                    goto sendfail;
-                }
-            }
-            else if (msg.message_type == MSG_TYPE_NOSTR_SIGN_EVENT)
-            {
-                if (msg.message_len != NOSTR_EVENT_ID_BIN_LEN)
+                if (decrypted_len != NOSTR_EVENT_ID_BIN_LEN)
                 {
                     goto sendillegal;
                 }
 
-                uint8_t event_id_bin[NOSTR_EVENT_ID_BIN_LEN], sig_bin[NOSTR_EVENT_SIG_BIN_LEN];
+                uint8_t sig_bin[NOSTR_EVENT_SIG_BIN_LEN];
 
-                if (sign(keypair->privateKey, event_id_bin, sig_bin) != 0)
+                if (sign(keypair->privateKey, decrypted, sig_bin) != 0)
                 {
                     free(decrypted);
                     goto sendfail;
@@ -360,11 +347,6 @@ void handle_message_task(void *pvParameters)
                 char source_text[source_len + 1] = {};
                 memcpy(source_text, decrypted + PUBKEY_LEN, source_len);
                 source_text[source_len] = 0;
-
-                printf("private key \n");
-                printByteArrayAsDec((char *)(keypair->privateKey), PRIVATE_KEY_LEN);
-                printf("pubkey \n");
-                printByteArrayAsDec((char *)their_pubkey_bin, PUBKEY_LEN);
 
                 char *result_content = NULL;
 
@@ -408,6 +390,19 @@ void handle_message_task(void *pvParameters)
                     }
 
                     send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
+                }
+            }
+            else if (msg.message_type == MSG_TYPE_REMOVE_KEY)
+            {
+                if (memcmp(decrypted, msg.iv, IV_SIZE) == 0 && removeAndSaveKeyPair(keypair->aesKey))
+                {
+                    // If the decrypt content equal iv
+                    send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+                }
+                else
+                {
+                    free(decrypted);
+                    goto sendfail;
                 }
             }
 
