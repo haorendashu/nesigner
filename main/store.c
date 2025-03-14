@@ -24,7 +24,23 @@ static bool save_to_nvs()
         return false;
     }
 
-    // 转换为存储格式
+    esp_err_t err;
+
+    // 处理空数组：直接写入长度为0的blob
+    if (keypair_count == 0)
+    {
+        err = nvs_set_blob(handle, "keypairs", NULL, 0); // 关键修改点
+        if (err != ESP_OK)
+        {
+            nvs_close(handle);
+            return false;
+        }
+        err = nvs_commit(handle);
+        nvs_close(handle);
+        return err == ESP_OK;
+    }
+
+    // 非空数组的正常处理
     StoredKeyPair *storage = malloc(keypair_count * sizeof(StoredKeyPair));
     if (!storage)
     {
@@ -38,8 +54,7 @@ static bool save_to_nvs()
         memcpy(storage[i].privateKey, keypairs[i].privateKey, PRIVATE_KEY_LEN);
     }
 
-    esp_err_t err = nvs_set_blob(handle, "keypairs", storage,
-                                 keypair_count * sizeof(StoredKeyPair));
+    err = nvs_set_blob(handle, "keypairs", storage, keypair_count * sizeof(StoredKeyPair));
     free(storage);
 
     if (err != ESP_OK)
@@ -201,42 +216,62 @@ bool addAndSaveKeyPair(const KeyPair *pair)
 
 bool removeAndSaveKeyPair(const uint8_t *aesKey)
 {
-    if (!aesKey)
+    if (!aesKey || keypair_count == 0)
         return false;
 
+    // 查找目标索引
+    size_t target_idx = keypair_count;
     for (size_t i = 0; i < keypair_count; i++)
     {
         if (memcmp(keypairs[i].aesKey, aesKey, AES_KEY_LEN) == 0)
         {
-            KeyPair *old_keypairs = keypairs;
-            size_t old_count = keypair_count;
-
-            if (i < keypair_count - 1)
-            {
-                memmove(&keypairs[i], &keypairs[i + 1], (keypair_count - i - 1) * sizeof(KeyPair));
-            }
-
-            KeyPair *new_ptr = realloc(keypairs, (keypair_count - 1) * sizeof(KeyPair));
-            if (!new_ptr && (keypair_count > 1))
-            {
-                return false; // 无法缩小内存，恢复原数组？
-                // 注意：此处memmove已破坏数据，无法完美恢复，建议用临时数组方式
-            }
-
-            keypairs = new_ptr;
-            keypair_count--;
-
-            if (!save_to_nvs())
-            {
-                keypairs = old_keypairs;
-                keypair_count = old_count;
-                return false;
-            }
-
-            return true;
+            target_idx = i;
+            break;
         }
     }
-    return false;
+    if (target_idx == keypair_count)
+        return false; // 未找到
+
+    // 创建新数组（避免直接修改原数组）
+    size_t new_count = keypair_count - 1;
+    KeyPair *new_keypairs = NULL;
+    if (new_count > 0)
+    {
+        new_keypairs = malloc(new_count * sizeof(KeyPair));
+        if (!new_keypairs)
+            return false;
+
+        // 复制除目标外的元素
+        memcpy(new_keypairs, keypairs, target_idx * sizeof(KeyPair));
+        if (target_idx < new_count)
+        {
+            memcpy(new_keypairs + target_idx,
+                   keypairs + target_idx + 1,
+                   (new_count - target_idx) * sizeof(KeyPair));
+        }
+    }
+
+    // 备份旧数据以便回滚
+    KeyPair *old_keypairs = keypairs;
+    size_t old_count = keypair_count;
+
+    // 更新全局变量
+    keypairs = new_keypairs;
+    keypair_count = new_count;
+
+    // 尝试保存到NVS
+    if (!save_to_nvs())
+    {
+        // 保存失败，回滚旧数据
+        free(new_keypairs);
+        keypairs = old_keypairs;
+        keypair_count = old_count;
+        return false;
+    }
+
+    // 保存成功，释放旧内存
+    free(old_keypairs);
+    return true;
 }
 
 KeyPair *findKeyPairByPubkey(const uint8_t *pubkey)

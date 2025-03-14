@@ -256,13 +256,12 @@ void handle_message_task(void *pvParameters)
 
                 goto cleanup;
             }
-            else if (msg.message_type == MSG_TYPE_NOSTR_GET_PUBLIC_KEY)
+            else if (msg.message_type == MSG_TYPE_NOSTR_GET_PUBLIC_KEY || msg.message_type == MSG_TYPE_REMOVE_KEY)
             {
-                printByteArrayAsDec((char *)msg.iv, IV_SIZE);
                 // try to use keyparis to aes decrypt message
                 for (size_t i = 0; i < keypair_count; i++)
                 {
-                    printf("GET PUBKEY: item %d\n", i);
+                    // printf("GET PUBKEY: item %d\n", i);
                     KeyPair keypair = keypairs[i];
                     uint8_t *decrypted = NULL;
                     size_t decrypted_len;
@@ -277,6 +276,7 @@ void handle_message_task(void *pvParameters)
                     if (memcmp(decrypted, msg.iv, IV_SIZE) == 0)
                     {
                         // If the decrypt content equal iv, find the aesKey!
+                        free(decrypted);
                         printf("find key!\n");
 
                         // char pubkey_hex[PUBKEY_LEN * 2 + 1] = {};
@@ -284,12 +284,31 @@ void handle_message_task(void *pvParameters)
                         // bin_to_hex(keypair.pubkey, PUBKEY_LEN, pubkey_hex);
                         // ESP_LOGI("Test", "pubkey_hex %s", pubkey_hex);
 
-                        send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, keypair.pubkey, PUBKEY_LEN);
-                        free(decrypted);
-                        goto cleanup;
+                        if (msg.message_type == MSG_TYPE_NOSTR_GET_PUBLIC_KEY)
+                        {
+                            send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, keypair.pubkey, PUBKEY_LEN);
+                            goto cleanup;
+                        }
+                        else if (msg.message_type == MSG_TYPE_REMOVE_KEY)
+                        {
+                            printf("begin to remove kp\n");
+                            if (removeAndSaveKeyPair(keypair.aesKey))
+                            {
+                                printf("remove success \n");
+                                send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, NULL, 0);
+                                goto cleanup;
+                            }
+                            else
+                            {
+                                printf("remove fail \n");
+                                goto sendfail;
+                            }
+                        }
                     }
                     free(decrypted);
                 }
+
+                send_response(MSG_RESULT_KEY_NOT_FOUND, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
                 goto cleanup;
             }
 
@@ -392,156 +411,6 @@ void handle_message_task(void *pvParameters)
                     send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
                 }
             }
-            else if (msg.message_type == MSG_TYPE_REMOVE_KEY)
-            {
-                if (memcmp(decrypted, msg.iv, IV_SIZE) == 0 && removeAndSaveKeyPair(keypair->aesKey))
-                {
-                    // If the decrypt content equal iv
-                    send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
-                }
-                else
-                {
-                    free(decrypted);
-                    goto sendfail;
-                }
-            }
-
-            // switch (msg.message_type)
-            // {
-            // case MSG_TYPE_REMOVE_KEY:
-            //     if (memcmp(decrypted, msg.iv, IV_SIZE) == 0 && removeAndSaveKeyPair(keypair->aesKey))
-            //     {
-            //         // If the decrypt content equal iv
-            //         send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
-            //     }
-            //     else
-            //     {
-            //         free(decrypted);
-            //         goto sendfail;
-            //     }
-            //     break;
-
-            // case MSG_TYPE_NOSTR_SIGN_EVENT:
-            //     // get the event id and sign it
-            //     if (msg.message_len != NOSTR_EVENT_ID_BIN_LEN)
-            //     {
-            //         goto sendillegal;
-            //     }
-
-            //     uint8_t event_id_bin[NOSTR_EVENT_ID_BIN_LEN], sig_bin[NOSTR_EVENT_SIG_BIN_LEN];
-
-            //     if (sign(keypair->privateKey, event_id_bin, sig_bin) != 0)
-            //     {
-            //         free(decrypted);
-            //         goto sendfail;
-            //     }
-
-            //     send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, sig_bin, NOSTR_EVENT_SIG_BIN_LEN);
-            //     break;
-            // case MSG_TYPE_NOSTR_NIP04_ENCRYPT:
-            // {
-            //     uint8_t their_pubkey_bin[PUBKEY_LEN];
-            //     memcpy(their_pubkey_bin, decrypted, PUBKEY_LEN);
-
-            //     size_t source_len = decrypted_len - PUBKEY_LEN;
-            //     char source_bytes[source_len + 1] = {};
-            //     memcpy(source_bytes, decrypted + PUBKEY_LEN, source_len);
-            //     source_bytes[source_len] = 0;
-
-            //     char *result_content = NULL;
-            //     printf("private key \n");
-            //     printByteArrayAsDec((char *)(keypair->privateKey), PRIVATE_KEY_LEN);
-            //     printf("pubkey \n");
-            //     printByteArrayAsDec((char *)their_pubkey_bin, PUBKEY_LEN);
-
-            //     if (nip04_encrypt(keypair->privateKey, their_pubkey_bin, (char *)source_bytes, &result_content) != 0)
-            //     {
-            //         free(decrypted);
-            //         goto sendfail;
-            //     }
-
-            //     send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
-            //     break;
-            // }
-            // case MSG_TYPE_NOSTR_NIP04_DECRYPT:
-            // {
-            //     if (msg.message_len <= PUBKEY_LEN)
-            //     {
-            //         goto sendillegal;
-            //     }
-
-            //     uint8_t their_pubkey_bin[PUBKEY_LEN];
-            //     memcpy(their_pubkey_bin, msg.message, PUBKEY_LEN);
-
-            //     size_t source_len = msg.message_len - PUBKEY_LEN;
-            //     char source_bytes[source_len + 1] = {};
-            //     memcpy(source_bytes, msg.message + PUBKEY_LEN, source_len);
-            //     source_bytes[source_len] = 0;
-
-            //     char *result_content = NULL;
-            //     if (nip04_decrypt(keypair->privateKey, their_pubkey_bin, (char *)source_bytes, &result_content) != 0)
-            //     {
-            //         free(decrypted);
-            //         goto sendfail;
-            //     }
-
-            //     send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
-            //     break;
-            // }
-            // case MSG_TYPE_NOSTR_NIP44_ENCRYPT:
-            // {
-            //     if (msg.message_len <= PUBKEY_LEN)
-            //     {
-            //         goto sendillegal;
-            //     }
-
-            //     uint8_t their_pubkey_bin[PUBKEY_LEN];
-            //     memcpy(their_pubkey_bin, msg.message, PUBKEY_LEN);
-
-            //     size_t source_len = msg.message_len - PUBKEY_LEN;
-            //     char source_bytes[source_len + 1] = {};
-            //     memcpy(source_bytes, msg.message + PUBKEY_LEN, source_len);
-            //     source_bytes[source_len] = 0;
-
-            //     char *result_content = NULL;
-            //     if (nip44_encrypt(keypair->privateKey, their_pubkey_bin, (char *)source_bytes, &result_content) != 0)
-            //     {
-            //         free(decrypted);
-            //         goto sendfail;
-            //     }
-
-            //     send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
-            //     break;
-            // }
-            // case MSG_TYPE_NOSTR_NIP44_DECRYPT:
-            // {
-            //     if (msg.message_len <= PUBKEY_LEN)
-            //     {
-            //         goto sendillegal;
-            //     }
-
-            //     uint8_t their_pubkey_bin[PUBKEY_LEN];
-            //     memcpy(their_pubkey_bin, msg.message, PUBKEY_LEN);
-
-            //     size_t source_len = msg.message_len - PUBKEY_LEN;
-            //     char source_bytes[source_len + 1] = {};
-            //     memcpy(source_bytes, msg.message + PUBKEY_LEN, source_len);
-            //     source_bytes[source_len] = 0;
-
-            //     char *result_content = NULL;
-            //     if (nip44_decrypt(keypair->privateKey, their_pubkey_bin, (char *)source_bytes, &result_content) != 0)
-            //     {
-            //         free(decrypted);
-            //         goto sendfail;
-            //     }
-
-            //     send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
-            //     break;
-            // }
-
-            // default:
-            //     break;
-            // }
 
             free(decrypted);
             goto cleanup;
@@ -564,42 +433,6 @@ void app_main(void)
     // esp_log_level_set("*", ESP_LOG_NONE);
 
     initStorage();
-
-    // {
-    //     uint8_t iv[IV_SIZE];
-    //     generate_random_iv(iv);
-    //     char iv_hex[IV_SIZE * 2] = {0};
-    //     bin_to_hex(iv, IV_SIZE, iv_hex);
-    //     ESP_LOGI("Test", "ivhex %s", iv_hex);
-
-    //     char *TEST_TEXT = "Hello, Nostr! This is a test message.";
-
-    //     uint8_t *encrypted_bytes = NULL;
-    //     size_t encrypted_len;
-    //     if (aes_encrypt_padded(keypairs[0].aesKey, 16, iv, (const uint8_t *)TEST_TEXT, strlen(TEST_TEXT),
-    //                            &encrypted_bytes, &encrypted_len) != 0)
-    //     {
-    //         ESP_LOGE("Test", "AES encryption failed");
-    //         return;
-    //     }
-    //     char encrypted_text[encrypted_len * 2 + 1] = {};
-    //     bin_to_hex(encrypted_bytes, encrypted_len, encrypted_text);
-    //     encrypted_text[encrypted_len * 2] = 0;
-    //     ESP_LOGI("Test", "Encrypted content hex: %s", encrypted_text);
-
-    //     uint8_t *decrypted_bytes = NULL;
-    //     size_t decrypted_len;
-    //     if (aes_decrypt_padded(keypairs[0].aesKey, 16, iv, encrypted_bytes, encrypted_len,
-    //                            &decrypted_bytes, &decrypted_len) != 0)
-    //     {
-    //         ESP_LOGE("Test", "AES decryption failed");
-    //         return;
-    //     }
-    //     char decrypted_text[decrypted_len + 1] = {};
-    //     memcpy(decrypted_text, decrypted_bytes, decrypted_len);
-    //     decrypted_text[decrypted_len] = 0;
-    //     ESP_LOGI("Test", "Decrypt content: %s %d", decrypted_text, decrypted_len);
-    // }
 
     // 配置 UART
     uart_config_t uart_config = {
