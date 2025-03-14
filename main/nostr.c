@@ -66,6 +66,57 @@ static int init_crypto_context(mbedtls_ecp_group *grp, mbedtls_ctr_drbg_context 
     return 0;
 }
 
+int gen_private_key(uint8_t private_key_bin[32])
+{
+    mbedtls_ecp_group grp;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    mbedtls_mpi d;
+    int ret = -1;
+
+    // 初始化加密上下文
+    if (init_crypto_context(&grp, &ctr_drbg) != 0)
+    {
+        ESP_LOGE("Nostr", "Failed to initialize crypto context");
+        return -1;
+    }
+
+    mbedtls_mpi_init(&d);
+
+    // 生成私钥（需要满足 1 <= d < N）
+    do
+    {
+        // 生成32字节随机数
+        if (mbedtls_mpi_fill_random(&d, 32, mbedtls_ctr_drbg_random, &ctr_drbg) != 0)
+        {
+            ESP_LOGE("Nostr", "Failed to generate random private key");
+            goto cleanup;
+        }
+
+        // 确保私钥在有效范围内：1 <= d < N
+        if (mbedtls_mpi_cmp_int(&d, 0) <= 0 ||
+            mbedtls_mpi_cmp_mpi(&d, &grp.N) >= 0)
+        {
+            continue; // 生成的密钥无效，重新生成
+        }
+
+        // 将私钥写入二进制缓冲区
+        if (mbedtls_mpi_write_binary(&d, private_key_bin, 32) != 0)
+        {
+            ESP_LOGE("Nostr", "Failed to write private key to binary");
+            goto cleanup;
+        }
+
+        ret = 0;
+        break;
+    } while (1);
+
+cleanup:
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    return ret;
+}
+
 // 核心逻辑：私钥生成公钥
 int get_public(const uint8_t *privkey_bin, uint8_t *pubkey_bin)
 {

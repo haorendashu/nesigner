@@ -24,6 +24,9 @@ int hex_to_bin(const char *hex, uint8_t *bin, size_t bin_size);
 // 将二进制转换为16进制字符串
 void bin_to_hex(const uint8_t *bin, size_t bin_size, char *hex);
 
+// 生成私钥
+int gen_private_key(uint8_t private_key_bin[32]);
+
 // 核心逻辑：私钥生成公钥
 int get_public(const uint8_t *privkey_bin, uint8_t *pubkey_bin);
 
