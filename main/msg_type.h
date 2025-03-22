@@ -14,5 +14,6 @@
 #define MSG_TYPE_ECHO 11
 #define MSG_TYPE_UPDATE_KEY 12
 #define MSG_TYPE_REMOVE_KEY 13
+#define MSG_TYPE_GET_TEMP_PUBKEY 14
 
 #endif

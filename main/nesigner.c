@@ -41,6 +41,8 @@ static const char *TAG = "NESIGNER";
 #define AES_KEY_SIZE 256
 // static const uint8_t aes_key[] = "0123456789ABCDEF0123456789ABCDEF"; // 32字节密钥
 
+uint8_t temp_private_key[PRIVATE_KEY_LEN];
+
 // 生成随机 IV 的函数
 void generate_random_iv(uint8_t iv[IV_SIZE])
 {
@@ -69,28 +71,6 @@ uint16_t crc16(uint8_t *data, size_t len)
     }
     return crc;
 }
-
-// // AES 加密
-// void aes_encrypt(uint8_t *aesKey, uint8_t *input, uint8_t *output, size_t len, uint8_t *iv)
-// {
-//     mbedtls_aes_context aes;
-//     mbedtls_aes_init(&aes);
-//     mbedtls_aes_setkey_enc(&aes, aesKey, AES_KEY_SIZE);
-
-//     size_t nc_off = 0;
-//     uint8_t stream_block[16];
-//     uint8_t local_iv[16];
-//     memcpy(local_iv, iv, 16); // 复制IV以防止修改原始数据
-
-//     mbedtls_aes_crypt_ctr(&aes, len, &nc_off, local_iv, stream_block, input, output);
-//     mbedtls_aes_free(&aes);
-// }
-
-// // AES解密
-// void aes_decrypt(uint8_t *aesKey, const uint8_t *input, uint8_t *output, size_t len, const uint8_t *iv)
-// {
-//     aes_encrypt(aesKey, input, output, len, iv); // CTR模式解密相同
-// }
 
 // 消息结构体
 typedef struct
@@ -220,6 +200,16 @@ void handle_message_task(void *pvParameters)
                 send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, msg.message, msg.message_len);
                 goto cleanup;
             }
+            else if (msg.message_type == MSG_TYPE_GET_TEMP_PUBKEY)
+            {
+                uint8_t temp_pubkey[PUBKEY_LEN];
+                if (get_public(temp_private_key, temp_pubkey) == -1)
+                {
+                    goto sendfail;
+                }
+                send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, temp_pubkey, PUBKEY_LEN);
+                goto cleanup;
+            }
             else if (msg.message_type == MSG_TYPE_UPDATE_KEY)
             {
                 if (msg.message_len < PRIVATE_KEY_LEN + AES_KEY_LEN)
@@ -227,10 +217,19 @@ void handle_message_task(void *pvParameters)
                     goto sendillegal;
                 }
 
+                char *decrypted_content = NULL;
+                char encrypted_content[msg.message_len + 1] = {};
+                memcpy(encrypted_content, msg.message, msg.message_len);
+                encrypted_content[msg.message_len] = 0;
+                if (nip44_decrypt(temp_private_key, msg.pubkey, encrypted_content, &decrypted_content) != 0)
+                {
+                    goto sendillegal;
+                }
+
                 uint8_t private_key_bin[PRIVATE_KEY_LEN];
                 uint8_t aes_key_bin[AES_KEY_LEN];
-                memcpy(private_key_bin, msg.message, PRIVATE_KEY_LEN);
-                memcpy(aes_key_bin, msg.message + PRIVATE_KEY_LEN, AES_KEY_LEN);
+                memcpy(private_key_bin, decrypted_content, PRIVATE_KEY_LEN);
+                memcpy(aes_key_bin, decrypted_content + PRIVATE_KEY_LEN, AES_KEY_LEN);
 
                 // char private_key_hex[PRIVATE_KEY_LEN * 2 + 1] = {};
                 // private_key_hex[PRIVATE_KEY_LEN * 2] = 0;
@@ -431,6 +430,12 @@ void app_main(void)
 {
     // 关闭所有日志输出
     // esp_log_level_set("*", ESP_LOG_NONE);
+
+    if (gen_private_key(temp_private_key) == -1)
+    {
+        ESP_LOGI("Test", "gen temp private key fail");
+        return;
+    }
 
     initStorage();
 
