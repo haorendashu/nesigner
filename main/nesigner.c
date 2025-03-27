@@ -14,6 +14,9 @@
 #include "store.h"
 #include "msg_result.h"
 #include "utils.h"
+#include "tinyusb.h"
+#include "tusb_cdc_acm.h"
+#include "sdkconfig.h"
 
 // #define UART_PORT_NUM UART_NUM_0 // 使用 UART0（USB-JTAG/Serial 控制器）
 #define UART_PORT_NUM UART_NUM_2 // 使用 UART0（USB-JTAG/Serial 控制器）
@@ -75,6 +78,7 @@ uint16_t crc16(uint8_t *data, size_t len)
 // 消息结构体
 typedef struct
 {
+    uint8_t itf; // Index of CDC device interface
     uint16_t message_type;
     uint8_t message_id[ID_SIZE];
     uint8_t pubkey[PUBKEY_SIZE];
@@ -117,7 +121,7 @@ bool read_fixed_length_data(uint8_t *buffer, int length, uint64_t timeout_ms)
 }
 
 // 发送响应消息
-void send_response(uint16_t message_result, uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
+void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
                    const uint8_t *message, int message_len)
 {
     uint8_t type_bin[TYPE_SIZE] = {(message_type >> 8) & 0xFF,
@@ -132,28 +136,66 @@ void send_response(uint16_t message_result, uint16_t message_type, const uint8_t
         (message_len >> 8) & 0xFF,
         message_len & 0xFF};
 
-    uart_write_bytes(UART_PORT_NUM, (char *)&type_bin, TYPE_SIZE);
-    uart_write_bytes(UART_PORT_NUM, (char *)message_id, ID_SIZE); // 直接发送二进制ID
-    uart_write_bytes(UART_PORT_NUM, (char *)&result_bin, RESULT_SIZE);
-    uart_write_bytes(UART_PORT_NUM, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
-    uart_write_bytes(UART_PORT_NUM, (char *)iv, IV_SIZE);         // 直接发送二进制IV
-    if (message_len > 0 && message != NULL)
+    if (itf == -1)
     {
-        uint16_t crc = crc16(message, message_len);
-        uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
-        uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, CRC_SIZE);  // crc
-        uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE);  // header
-        uart_write_bytes(UART_PORT_NUM, (char *)message, message_len); // content
+        // send by uart
+        uart_write_bytes(UART_PORT_NUM, (char *)&type_bin, TYPE_SIZE);
+        uart_write_bytes(UART_PORT_NUM, (char *)message_id, ID_SIZE); // 直接发送二进制ID
+        uart_write_bytes(UART_PORT_NUM, (char *)&result_bin, RESULT_SIZE);
+        uart_write_bytes(UART_PORT_NUM, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
+        uart_write_bytes(UART_PORT_NUM, (char *)iv, IV_SIZE);         // 直接发送二进制IV
+        if (message_len > 0 && message != NULL)
+        {
+            uint16_t crc = crc16(message, message_len);
+            uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
+            uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, CRC_SIZE);  // crc
+            uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE);  // header
+            uart_write_bytes(UART_PORT_NUM, (char *)message, message_len); // content
+        }
+        else
+        {
+            char empty_crc[2] = {0};
+            uart_write_bytes(UART_PORT_NUM, empty_crc, CRC_SIZE);         // crc
+            uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE); // header
+        }
     }
     else
     {
-        char empty_crc[2] = {0};
-        uart_write_bytes(UART_PORT_NUM, empty_crc, CRC_SIZE);         // crc
-        uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE); // header
+        size_t bufferSize = TYPE_SIZE + ID_SIZE + RESULT_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE + message_len;
+        uint8_t *buffer = malloc(bufferSize);
+
+        memcpy(buffer, type_bin, TYPE_SIZE);
+        memcpy(buffer + TYPE_SIZE, message_id, ID_SIZE);
+        memcpy(buffer + ID_SIZE, &result_bin, RESULT_SIZE);
+        memcpy(buffer + RESULT_SIZE, pubkey, PUBKEY_SIZE);
+        memcpy(buffer + PUBKEY_SIZE, iv, IV_SIZE);
+        if (message_len > 0 && message != NULL)
+        {
+            uint16_t crc = crc16(message, message_len);
+            uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
+            memcpy(buffer + IV_SIZE, crc_bytes, CRC_SIZE);
+            memcpy(buffer + CRC_SIZE, header, HEADER_SIZE);
+            memcpy(buffer + HEADER_SIZE, message, message_len);
+        }
+        else
+        {
+            char empty_crc[2] = {0};
+            memcpy(buffer + IV_SIZE, empty_crc, CRC_SIZE);
+            memcpy(buffer + CRC_SIZE, header, HEADER_SIZE);
+        }
+
+        // send by usb
+        tinyusb_cdcacm_write_queue(itf, buffer, bufferSize);
+        esp_err_t err = tinyusb_cdcacm_write_flush(itf, 0);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
+        }
+        free(buffer);
     }
 }
 
-void send_response_with_encrypt(uint8_t *aesKey, uint16_t message_result, uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
+void send_response_with_encrypt(uint8_t itf, uint8_t *aesKey, uint16_t message_result, uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
                                 const uint8_t *message, int message_len)
 {
     if (message_len > 0 && aesKey != NULL)
@@ -166,17 +208,17 @@ void send_response_with_encrypt(uint8_t *aesKey, uint16_t message_result, uint16
             return;
         }
 
-        send_response(message_result, message_type, message_id, pubkey, iv, encrypted, encrypted_len);
+        send_response(itf, message_result, message_type, message_id, pubkey, iv, encrypted, encrypted_len);
         free(encrypted);
     }
     else
     {
-        send_response(message_result, message_type, message_id, pubkey, iv, message, message_len);
+        send_response(itf, message_result, message_type, message_id, pubkey, iv, message, message_len);
     }
 }
 
 // 处理消息的 Task
-void handle_message_task(void *pvParameters)
+void handle_uart_message_task(void *pvParameters)
 {
     while (1)
     {
@@ -192,12 +234,12 @@ void handle_message_task(void *pvParameters)
 
             if (msg.message_type == MSG_TYPE_PING)
             {
-                send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, msg.message, 0);
+                send_response(msg.itf, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, msg.message, 0);
                 goto cleanup;
             }
             else if (msg.message_type == MSG_TYPE_ECHO)
             {
-                send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, msg.message, msg.message_len);
+                send_response(msg.itf, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, msg.message, msg.message_len);
                 goto cleanup;
             }
             else if (msg.message_type == MSG_TYPE_GET_TEMP_PUBKEY)
@@ -207,7 +249,7 @@ void handle_message_task(void *pvParameters)
                 {
                     goto sendfail;
                 }
-                send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, temp_pubkey, PUBKEY_LEN);
+                send_response(msg.itf, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, temp_pubkey, PUBKEY_LEN);
                 goto cleanup;
             }
             else if (msg.message_type == MSG_TYPE_UPDATE_KEY)
@@ -246,7 +288,7 @@ void handle_message_task(void *pvParameters)
 
                 if (addAndSaveKeyPair(keyPair))
                 {
-                    send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+                    send_response(msg.itf, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
                 }
                 else
                 {
@@ -285,7 +327,7 @@ void handle_message_task(void *pvParameters)
 
                         if (msg.message_type == MSG_TYPE_NOSTR_GET_PUBLIC_KEY)
                         {
-                            send_response_with_encrypt(keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, keypair.pubkey, PUBKEY_LEN);
+                            send_response_with_encrypt(msg.itf, keypair.aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, keypair.pubkey, iv, keypair.pubkey, PUBKEY_LEN);
                             goto cleanup;
                         }
                         else if (msg.message_type == MSG_TYPE_REMOVE_KEY)
@@ -294,7 +336,7 @@ void handle_message_task(void *pvParameters)
                             if (removeAndSaveKeyPair(keypair.aesKey))
                             {
                                 printf("remove success \n");
-                                send_response(MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, NULL, 0);
+                                send_response(msg.itf, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, NULL, 0);
                                 goto cleanup;
                             }
                             else
@@ -307,7 +349,7 @@ void handle_message_task(void *pvParameters)
                     free(decrypted);
                 }
 
-                send_response(MSG_RESULT_KEY_NOT_FOUND, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+                send_response(msg.itf, MSG_RESULT_KEY_NOT_FOUND, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
                 goto cleanup;
             }
 
@@ -319,13 +361,13 @@ void handle_message_task(void *pvParameters)
                 if (keypair == NULL)
                 {
                     // can't find the keypair,
-                    send_response(MSG_RESULT_KEY_NOT_FOUND, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+                    send_response(msg.itf, MSG_RESULT_KEY_NOT_FOUND, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
                     goto cleanup;
                 }
             }
             else
             {
-                send_response(MSG_RESULT_CONTENT_NOT_ALLOW_EMPTY, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+                send_response(msg.itf, MSG_RESULT_CONTENT_NOT_ALLOW_EMPTY, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
                 goto cleanup;
             }
 
@@ -354,7 +396,7 @@ void handle_message_task(void *pvParameters)
                     goto sendfail;
                 }
 
-                send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, sig_bin, NOSTR_EVENT_SIG_BIN_LEN);
+                send_response_with_encrypt(msg.itf, keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, sig_bin, NOSTR_EVENT_SIG_BIN_LEN);
             }
             else if (msg.message_type == MSG_TYPE_NOSTR_NIP04_ENCRYPT || msg.message_type == MSG_TYPE_NOSTR_NIP04_DECRYPT || msg.message_type == MSG_TYPE_NOSTR_NIP44_ENCRYPT || msg.message_type == MSG_TYPE_NOSTR_NIP44_DECRYPT)
             {
@@ -376,7 +418,7 @@ void handle_message_task(void *pvParameters)
                         goto sendfail;
                     }
 
-                    send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
+                    send_response_with_encrypt(msg.itf, keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
                 }
                 else if (msg.message_type == MSG_TYPE_NOSTR_NIP04_DECRYPT)
                 {
@@ -386,7 +428,7 @@ void handle_message_task(void *pvParameters)
                         goto sendfail;
                     }
 
-                    send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
+                    send_response_with_encrypt(msg.itf, keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
                 }
                 else if (msg.message_type == MSG_TYPE_NOSTR_NIP44_ENCRYPT)
                 {
@@ -396,7 +438,7 @@ void handle_message_task(void *pvParameters)
                         goto sendfail;
                     }
 
-                    send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
+                    send_response_with_encrypt(msg.itf, keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
                 }
                 else if (msg.message_type == MSG_TYPE_NOSTR_NIP44_DECRYPT)
                 {
@@ -407,7 +449,7 @@ void handle_message_task(void *pvParameters)
                         goto sendfail;
                     }
 
-                    send_response_with_encrypt(keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
+                    send_response_with_encrypt(msg.itf, keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, (uint8_t *)result_content, strlen(result_content));
                 }
             }
 
@@ -415,10 +457,10 @@ void handle_message_task(void *pvParameters)
             goto cleanup;
 
         sendillegal:
-            send_response(MSG_RESULT_CONTENT_ILLEGAL, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+            send_response(msg.itf, MSG_RESULT_CONTENT_ILLEGAL, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
             goto cleanup;
         sendfail:
-            send_response(MSG_RESULT_FAIL, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
+            send_response(msg.itf, MSG_RESULT_FAIL, msg.message_type, msg.message_id, msg.pubkey, msg.iv, NULL, 0);
             goto cleanup;
         cleanup:
             free(msg.message);
@@ -426,19 +468,8 @@ void handle_message_task(void *pvParameters)
     }
 }
 
-void app_main(void)
+void uart_config()
 {
-    // 关闭所有日志输出
-    // esp_log_level_set("*", ESP_LOG_NONE);
-
-    if (gen_private_key(temp_private_key) == -1)
-    {
-        ESP_LOGI("Test", "gen temp private key fail");
-        return;
-    }
-
-    initStorage();
-
     // 配置 UART
     uart_config_t uart_config = {
         .baud_rate = UART_BAUD_RATE,
@@ -453,21 +484,10 @@ void app_main(void)
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, GPIO_NUM_4, GPIO_NUM_5, -1, -1));
     ESP_ERROR_CHECK(uart_driver_install(UART_PORT_NUM, MAX_MESSAGE_SIZE * 2, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));
+}
 
-    // 创建消息队列
-    message_queue = xQueueCreate(QUEUE_SIZE, sizeof(message_t));
-    if (message_queue == NULL)
-    {
-        ESP_LOGE(TAG, "Failed to create message queue");
-        return;
-    }
-
-    // 创建处理消息的 Task
-    xTaskCreate(handle_message_task, "handle_message_task", TASK_STACK_SIZE, NULL, 5, NULL);
-
-    // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
-    ESP_LOGI(TAG, "nesigner UART started");
-
+void uart_data_receive()
+{
     uint8_t type[TYPE_SIZE];     // 用于存储消息类型
     uint8_t id[ID_SIZE];         // 用于存储消息 ID
     uint8_t pubkey[PUBKEY_SIZE]; // 用于Pubkey
@@ -540,6 +560,7 @@ void app_main(void)
 
         // 构造消息
         message_t msg = {
+            .itf = -1,
             .message_type = message_type,
             .message_len = total_len};
         memcpy(msg.message_id, id, ID_SIZE);
@@ -552,4 +573,276 @@ void app_main(void)
 
         ESP_LOGI(TAG, "msg sended to queue");
     }
+}
+
+static uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1];
+
+/**
+ * @brief USB Message Queue
+ */
+static QueueHandle_t usb_msg_queue;
+typedef struct
+{
+    uint8_t buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1]; // Data buffer
+    size_t buf_len;                                 // Number of bytes received
+    uint8_t itf;                                    // Index of CDC device interface
+} usb_message_t;
+
+// 自定义 USB 配置
+#define USB_VID 0x2323 // 自定义厂商ID
+#define USB_PID 0x3434 // 自定义产品ID
+
+// USB 设备描述符
+static tusb_desc_device_t descriptor_dev = {
+    .bLength = sizeof(tusb_desc_device_t),
+    .bDescriptorType = TUSB_DESC_DEVICE,
+    .bcdUSB = 0x0200,
+    .bDeviceClass = TUSB_CLASS_VENDOR_SPECIFIC,
+    .bDeviceSubClass = 0x00,
+    .bDeviceProtocol = 0x00,
+    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
+    .idVendor = USB_VID,
+    .idProduct = USB_PID,
+    .bcdDevice = 0x0100,
+    .iManufacturer = 0x01,
+    .iProduct = 0x02,
+    .iSerialNumber = 0x03,
+    .bNumConfigurations = 0x01};
+
+/**
+ * @brief CDC device RX callback
+ *
+ * CDC device signals, that new data were received
+ *
+ * @param[in] itf   CDC device index
+ * @param[in] event CDC event type
+ */
+void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
+{
+    /* initialization */
+    size_t rx_size = 0;
+
+    /* read */
+    esp_err_t ret = tinyusb_cdcacm_read(itf, rx_buf, CONFIG_TINYUSB_CDC_RX_BUFSIZE, &rx_size);
+    if (ret == ESP_OK)
+    {
+        usb_message_t tx_msg = {
+            .buf_len = rx_size,
+            .itf = itf,
+        };
+
+        memcpy(tx_msg.buf, rx_buf, rx_size);
+        xQueueSend(usb_msg_queue, &tx_msg, 0);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Read Error");
+    }
+}
+
+/**
+ * @brief CDC device line change callback
+ *
+ * CDC device signals, that the DTR, RTS states changed
+ *
+ * @param[in] itf   CDC device index
+ * @param[in] event CDC event type
+ */
+void tinyusb_cdc_line_state_changed_callback(int itf, cdcacm_event_t *event)
+{
+    int dtr = event->line_state_changed_data.dtr;
+    int rts = event->line_state_changed_data.rts;
+    ESP_LOGI(TAG, "Line state changed on channel %d: DTR:%d, RTS:%d", itf, dtr, rts);
+}
+
+void usb_config()
+{
+    usb_msg_queue = xQueueCreate(5, sizeof(usb_message_t));
+
+    char *string_descriptor = "nesigner";
+    const char *str_ptr = string_descriptor;
+
+    const tinyusb_config_t tusb_cfg = {
+        .device_descriptor = &descriptor_dev,
+        .string_descriptor = &str_ptr,
+        .external_phy = false,
+#if (TUD_OPT_HIGH_SPEED)
+        .fs_configuration_descriptor = NULL,
+        .hs_configuration_descriptor = NULL,
+        .qualifier_descriptor = NULL,
+#else
+        .configuration_descriptor = NULL,
+#endif // TUD_OPT_HIGH_SPEED
+    };
+
+    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+
+    tinyusb_config_cdcacm_t acm_cfg = {
+        .usb_dev = TINYUSB_USBDEV_0,
+        .cdc_port = TINYUSB_CDC_ACM_0,
+        .rx_unread_buf_sz = 64,
+        .callback_rx = &tinyusb_cdc_rx_callback, // the first way to register a callback
+        .callback_rx_wanted_char = NULL,
+        .callback_line_state_changed = NULL,
+        .callback_line_coding_changed = NULL};
+
+    ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
+    /* the second way to register a callback */
+    ESP_ERROR_CHECK(tinyusb_cdcacm_register_callback(
+        TINYUSB_CDC_ACM_0,
+        CDC_EVENT_LINE_STATE_CHANGED,
+        &tinyusb_cdc_line_state_changed_callback));
+
+#if (CONFIG_TINYUSB_CDC_COUNT > 1)
+    acm_cfg.cdc_port = TINYUSB_CDC_ACM_1;
+    ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
+    ESP_ERROR_CHECK(tinyusb_cdcacm_register_callback(
+        TINYUSB_CDC_ACM_1,
+        CDC_EVENT_LINE_STATE_CHANGED,
+        &tinyusb_cdc_line_state_changed_callback));
+#endif
+
+    ESP_LOGI(TAG, "USB initialization DONE");
+}
+
+void handle_usb_message_task(void *pvParameters)
+{
+    usb_message_t msg;
+    while (1)
+    {
+        if (xQueueReceive(usb_msg_queue, &msg, portMAX_DELAY))
+        {
+            // /* Print received data*/
+            // ESP_LOGI(TAG, "Data from channel %d:", msg.itf);
+            // ESP_LOG_BUFFER_HEXDUMP(TAG, msg.buf, msg.buf_len, ESP_LOG_INFO);
+
+            // /* write back */
+            // tinyusb_cdcacm_write_queue(msg.itf, msg.buf, msg.buf_len);
+            // esp_err_t err = tinyusb_cdcacm_write_flush(msg.itf, 0);
+            // if (err != ESP_OK)
+            // {
+            //     ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
+            // }
+
+            ESP_LOGI(TAG, "msg length %d: %d", msg.buf_len, (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE));
+
+            if (msg.buf_len >= (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE))
+            {
+
+                size_t offset = 0;
+
+                uint8_t type[TYPE_SIZE];
+                memcpy(type, msg.buf + offset, TYPE_SIZE);
+                offset += TYPE_SIZE;
+
+                uint8_t id[ID_SIZE];
+                memcpy(id, msg.buf + offset, ID_SIZE);
+                offset += ID_SIZE;
+
+                uint8_t pubkey[PUBKEY_SIZE];
+                memcpy(pubkey, msg.buf + offset, PUBKEY_SIZE);
+                offset += PUBKEY_SIZE;
+
+                uint8_t iv[IV_SIZE];
+                memcpy(iv, msg.buf + offset, IV_SIZE);
+                offset += IV_SIZE;
+
+                uint8_t crc[CRC_SIZE];
+                memcpy(crc, msg.buf + offset, CRC_SIZE);
+                offset += CRC_SIZE;
+
+                uint8_t header[HEADER_SIZE];
+                memcpy(header, msg.buf + offset, HEADER_SIZE);
+                offset += HEADER_SIZE;
+
+                // 解析数据长度
+                uint32_t data_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
+
+                ESP_LOGI(TAG, "data_len %d", data_len);
+
+                // 检查是否有足够的数据读取加密内容
+                if (msg.buf_len < offset + data_len)
+                    break; // 数据不足，等待更多
+
+                uint8_t *encrypted = malloc(data_len);
+                if (!encrypted)
+                {
+                    ESP_LOGE(TAG, "Failed to allocate memory for encrypted data");
+                    break;
+                }
+                memcpy(encrypted, msg.buf + offset, data_len);
+                offset += data_len;
+
+                // 验证CRC
+                uint16_t received_crc = (crc[0] << 8) | crc[1];
+                if (crc16(encrypted, data_len) != received_crc)
+                {
+                    ESP_LOGE(TAG, "CRC check failed");
+                    free(encrypted);
+                    continue;
+                }
+
+                // 构造消息
+                message_t message = {
+                    .itf = msg.itf,
+                    .message_type = (type[0] << 8) | type[1],
+                    .message_len = data_len};
+                memcpy(message.message_id, id, ID_SIZE);
+                memcpy(message.pubkey, pubkey, PUBKEY_SIZE);
+                memcpy(message.iv, iv, IV_SIZE);
+                message.message = malloc(data_len);
+                if (message.message)
+                {
+                    memcpy(message.message, encrypted, data_len);
+                    // 发送到队列
+                    if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(100)) != pdPASS)
+                    {
+                        ESP_LOGE(TAG, "Failed to send message to queue");
+                        free(message.message);
+                    }
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Failed to allocate message buffer");
+                }
+
+                free(encrypted);
+            }
+        }
+    }
+}
+
+void app_main(void)
+{
+    // 关闭所有日志输出
+    // esp_log_level_set("*", ESP_LOG_NONE);
+
+    if (gen_private_key(temp_private_key) == -1)
+    {
+        ESP_LOGI("Test", "gen temp private key fail");
+        return;
+    }
+
+    initStorage();
+
+    // 创建消息队列
+    message_queue = xQueueCreate(QUEUE_SIZE, sizeof(message_t));
+    if (message_queue == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create message queue");
+        return;
+    }
+
+    uart_config();
+
+    usb_config();
+
+    // 创建处理消息的 Task
+    xTaskCreate(handle_uart_message_task, "handle_uart_message_task", TASK_STACK_SIZE, NULL, 5, NULL);
+    xTaskCreate(handle_usb_message_task, "handle_usb_message_task", TASK_STACK_SIZE, NULL, 5, NULL);
+
+    // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
+    ESP_LOGI(TAG, "nesigner started");
+
+    uart_data_receive();
 }
