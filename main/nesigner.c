@@ -161,37 +161,83 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
     }
     else
     {
-        size_t bufferSize = TYPE_SIZE + ID_SIZE + RESULT_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE + message_len;
-        uint8_t *buffer = malloc(bufferSize);
-
-        memcpy(buffer, type_bin, TYPE_SIZE);
-        memcpy(buffer + TYPE_SIZE, message_id, ID_SIZE);
-        memcpy(buffer + ID_SIZE, &result_bin, RESULT_SIZE);
-        memcpy(buffer + RESULT_SIZE, pubkey, PUBKEY_SIZE);
-        memcpy(buffer + PUBKEY_SIZE, iv, IV_SIZE);
+        // send by uart
+        tinyusb_cdcacm_write_queue(itf, (char *)&type_bin, TYPE_SIZE);
+        tinyusb_cdcacm_write_queue(itf, (char *)message_id, ID_SIZE); // 直接发送二进制ID
+        tinyusb_cdcacm_write_queue(itf, (char *)&result_bin, RESULT_SIZE);
+        tinyusb_cdcacm_write_queue(itf, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
+        tinyusb_cdcacm_write_queue(itf, (char *)iv, IV_SIZE);         // 直接发送二进制IV
         if (message_len > 0 && message != NULL)
         {
             uint16_t crc = crc16(message, message_len);
             uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
-            memcpy(buffer + IV_SIZE, crc_bytes, CRC_SIZE);
-            memcpy(buffer + CRC_SIZE, header, HEADER_SIZE);
-            memcpy(buffer + HEADER_SIZE, message, message_len);
+            tinyusb_cdcacm_write_queue(itf, (char *)crc_bytes, CRC_SIZE);  // crc
+            tinyusb_cdcacm_write_queue(itf, (char *)header, HEADER_SIZE);  // header
+            tinyusb_cdcacm_write_queue(itf, (char *)message, message_len); // content
         }
         else
         {
             char empty_crc[2] = {0};
-            memcpy(buffer + IV_SIZE, empty_crc, CRC_SIZE);
-            memcpy(buffer + CRC_SIZE, header, HEADER_SIZE);
+            tinyusb_cdcacm_write_queue(itf, empty_crc, CRC_SIZE);         // crc
+            tinyusb_cdcacm_write_queue(itf, (char *)header, HEADER_SIZE); // header
         }
-
-        // send by usb
-        tinyusb_cdcacm_write_queue(itf, buffer, bufferSize);
-        esp_err_t err = tinyusb_cdcacm_write_flush(itf, 0);
+        esp_err_t err = tinyusb_cdcacm_write_flush(itf, 10000);
         if (err != ESP_OK)
         {
             ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
         }
-        free(buffer);
+
+        // size_t buffer_size = TYPE_SIZE + ID_SIZE + RESULT_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE + message_len;
+        // uint8_t *buffer = malloc(buffer_size);
+
+        // memcpy(buffer, type_bin, TYPE_SIZE);
+        // memcpy(buffer + TYPE_SIZE, message_id, ID_SIZE);
+        // memcpy(buffer + ID_SIZE, &result_bin, RESULT_SIZE);
+        // memcpy(buffer + RESULT_SIZE, pubkey, PUBKEY_SIZE);
+        // memcpy(buffer + PUBKEY_SIZE, iv, IV_SIZE);
+        // if (message_len > 0 && message != NULL)
+        // {
+        //     uint16_t crc = crc16(message, message_len);
+        //     uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
+        //     memcpy(buffer + IV_SIZE, crc_bytes, CRC_SIZE);
+        //     memcpy(buffer + CRC_SIZE, header, HEADER_SIZE);
+        //     memcpy(buffer + HEADER_SIZE, message, message_len);
+        // }
+        // else
+        // {
+        //     char empty_crc[2] = {0};
+        //     memcpy(buffer + IV_SIZE, empty_crc, CRC_SIZE);
+        //     memcpy(buffer + CRC_SIZE, header, HEADER_SIZE);
+        // }
+
+        // printByteArrayAsDec(buffer, buffer_size);
+
+        // // send by usb
+        // // ESP_LOGI(TAG, "buffer_size: %d CONFIG_TINYUSB_CDC_RX_BUFSIZE", buffer_size, CONFIG_TINYUSB_CDC_RX_BUFSIZE);
+        // // size_t sended_size = 0;
+        // // const size_t max_chunk_size = 64;
+        // // while (sended_size < buffer_size)
+        // // {
+        // //     size_t current_send_size = sended_size + max_chunk_size > buffer_size ? buffer_size - sended_size : max_chunk_size;
+        // //     size_t current_sended_size = tinyusb_cdcacm_write_queue(itf, buffer + sended_size, current_send_size);
+        // //     ESP_LOGI(TAG, "itf %d current_send_size %d current_sended_size: %d sended_size %d", itf, current_send_size, current_sended_size, sended_size);
+        // //     sended_size += current_sended_size;
+        // // }
+        // // esp_err_t err = tinyusb_cdcacm_write_flush(itf, 1000);
+        // // if (err != ESP_OK)
+        // // {
+        // //     ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
+        // // }
+
+        // ESP_LOGI(TAG, "buffer_size: %d CONFIG_TINYUSB_CDC_RX_BUFSIZE", buffer_size, CONFIG_TINYUSB_CDC_RX_BUFSIZE);
+        // size_t sended_size = tinyusb_cdcacm_write_queue(itf, buffer, buffer_size);
+        // ESP_LOGI(TAG, "USB write size: %d", sended_size);
+        // esp_err_t err = tinyusb_cdcacm_write_flush(itf, 0);
+        // if (err != ESP_OK)
+        // {
+        //     ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
+        // }
+        // free(buffer);
     }
 }
 
@@ -575,8 +621,6 @@ void uart_data_receive()
     }
 }
 
-static uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1];
-
 /**
  * @brief USB Message Queue
  */
@@ -609,6 +653,12 @@ static tusb_desc_device_t descriptor_dev = {
     .iSerialNumber = 0x03,
     .bNumConfigurations = 0x01};
 
+static uint8_t usb_msg_buffer[CONFIG_TINYUSB_CDC_RX_BUFSIZE * 8];
+
+static size_t usb_msg_buffer_size = 0;
+
+static uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE * 4];
+
 /**
  * @brief CDC device RX callback
  *
@@ -626,13 +676,109 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
     esp_err_t ret = tinyusb_cdcacm_read(itf, rx_buf, CONFIG_TINYUSB_CDC_RX_BUFSIZE, &rx_size);
     if (ret == ESP_OK)
     {
-        usb_message_t tx_msg = {
-            .buf_len = rx_size,
-            .itf = itf,
-        };
+        // /* Print received data*/
+        // ESP_LOGI(TAG, "Data from channel %d:", itf);
+        // ESP_LOG_BUFFER_HEXDUMP(TAG, rx_buf, rx_size, ESP_LOG_INFO);
 
-        memcpy(tx_msg.buf, rx_buf, rx_size);
-        xQueueSend(usb_msg_queue, &tx_msg, 0);
+        // /* write back */
+        // tinyusb_cdcacm_write_queue(itf, rx_buf, rx_size);
+        // esp_err_t err = tinyusb_cdcacm_write_flush(itf, 0);
+        // if (err != ESP_OK)
+        // {
+        //     ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
+        // }
+
+        memcpy(usb_msg_buffer + usb_msg_buffer_size, rx_buf, rx_size);
+        usb_msg_buffer_size += rx_size;
+
+        ESP_LOGI(TAG, "message size %d %d", usb_msg_buffer_size, (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE));
+        if (usb_msg_buffer_size < (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE))
+        {
+            return;
+        }
+
+        size_t offset = 0;
+
+        uint8_t type[TYPE_SIZE];
+        memcpy(type, usb_msg_buffer + offset, TYPE_SIZE);
+        offset += TYPE_SIZE;
+
+        uint8_t id[ID_SIZE];
+        memcpy(id, usb_msg_buffer + offset, ID_SIZE);
+        offset += ID_SIZE;
+
+        uint8_t pubkey[PUBKEY_SIZE];
+        memcpy(pubkey, usb_msg_buffer + offset, PUBKEY_SIZE);
+        offset += PUBKEY_SIZE;
+
+        uint8_t iv[IV_SIZE];
+        memcpy(iv, usb_msg_buffer + offset, IV_SIZE);
+        offset += IV_SIZE;
+
+        uint8_t crc[CRC_SIZE];
+        memcpy(crc, usb_msg_buffer + offset, CRC_SIZE);
+        offset += CRC_SIZE;
+
+        uint8_t header[HEADER_SIZE];
+        memcpy(header, usb_msg_buffer + offset, HEADER_SIZE);
+        offset += HEADER_SIZE;
+
+        // 解析数据长度
+        uint32_t data_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
+
+        ESP_LOGI(TAG, "data_len %d", data_len);
+
+        // 检查是否有足够的数据读取加密内容
+        if (usb_msg_buffer_size < offset + data_len)
+            return; // 数据不足，等待更多
+
+        uint8_t *encrypted = malloc(data_len);
+        if (!encrypted)
+        {
+            ESP_LOGE(TAG, "Failed to allocate memory for encrypted data");
+            return;
+        }
+        memcpy(encrypted, usb_msg_buffer + offset, data_len);
+        offset += data_len;
+
+        // copy remain data to buffer
+        usb_msg_buffer_size -= offset; // remain data size
+        memcpy(usb_msg_buffer, usb_msg_buffer + offset, usb_msg_buffer_size);
+
+        // 验证CRC
+        uint16_t received_crc = (crc[0] << 8) | crc[1];
+        if (crc16(encrypted, data_len) != received_crc)
+        {
+            ESP_LOGE(TAG, "CRC check failed");
+            free(encrypted);
+            return;
+        }
+
+        // 构造消息
+        message_t message = {
+            .itf = itf,
+            .message_type = (type[0] << 8) | type[1],
+            .message_len = data_len};
+        memcpy(message.message_id, id, ID_SIZE);
+        memcpy(message.pubkey, pubkey, PUBKEY_SIZE);
+        memcpy(message.iv, iv, IV_SIZE);
+        message.message = malloc(data_len);
+        if (message.message)
+        {
+            memcpy(message.message, encrypted, data_len);
+            // 发送到队列
+            if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(100)) != pdPASS)
+            {
+                ESP_LOGE(TAG, "Failed to send message to queue");
+                free(message.message);
+            }
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Failed to allocate message buffer");
+        }
+
+        free(encrypted);
     }
     else
     {
@@ -657,8 +803,6 @@ void tinyusb_cdc_line_state_changed_callback(int itf, cdcacm_event_t *event)
 
 void usb_config()
 {
-    usb_msg_queue = xQueueCreate(5, sizeof(usb_message_t));
-
     char *string_descriptor = "nesigner";
     const char *str_ptr = string_descriptor;
 
@@ -705,113 +849,6 @@ void usb_config()
     ESP_LOGI(TAG, "USB initialization DONE");
 }
 
-void handle_usb_message_task(void *pvParameters)
-{
-    usb_message_t msg;
-    while (1)
-    {
-        if (xQueueReceive(usb_msg_queue, &msg, portMAX_DELAY))
-        {
-            // /* Print received data*/
-            // ESP_LOGI(TAG, "Data from channel %d:", msg.itf);
-            // ESP_LOG_BUFFER_HEXDUMP(TAG, msg.buf, msg.buf_len, ESP_LOG_INFO);
-
-            // /* write back */
-            // tinyusb_cdcacm_write_queue(msg.itf, msg.buf, msg.buf_len);
-            // esp_err_t err = tinyusb_cdcacm_write_flush(msg.itf, 0);
-            // if (err != ESP_OK)
-            // {
-            //     ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
-            // }
-
-            ESP_LOGI(TAG, "msg length %d: %d", msg.buf_len, (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE));
-
-            if (msg.buf_len >= (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE))
-            {
-
-                size_t offset = 0;
-
-                uint8_t type[TYPE_SIZE];
-                memcpy(type, msg.buf + offset, TYPE_SIZE);
-                offset += TYPE_SIZE;
-
-                uint8_t id[ID_SIZE];
-                memcpy(id, msg.buf + offset, ID_SIZE);
-                offset += ID_SIZE;
-
-                uint8_t pubkey[PUBKEY_SIZE];
-                memcpy(pubkey, msg.buf + offset, PUBKEY_SIZE);
-                offset += PUBKEY_SIZE;
-
-                uint8_t iv[IV_SIZE];
-                memcpy(iv, msg.buf + offset, IV_SIZE);
-                offset += IV_SIZE;
-
-                uint8_t crc[CRC_SIZE];
-                memcpy(crc, msg.buf + offset, CRC_SIZE);
-                offset += CRC_SIZE;
-
-                uint8_t header[HEADER_SIZE];
-                memcpy(header, msg.buf + offset, HEADER_SIZE);
-                offset += HEADER_SIZE;
-
-                // 解析数据长度
-                uint32_t data_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
-
-                ESP_LOGI(TAG, "data_len %d", data_len);
-
-                // 检查是否有足够的数据读取加密内容
-                if (msg.buf_len < offset + data_len)
-                    break; // 数据不足，等待更多
-
-                uint8_t *encrypted = malloc(data_len);
-                if (!encrypted)
-                {
-                    ESP_LOGE(TAG, "Failed to allocate memory for encrypted data");
-                    break;
-                }
-                memcpy(encrypted, msg.buf + offset, data_len);
-                offset += data_len;
-
-                // 验证CRC
-                uint16_t received_crc = (crc[0] << 8) | crc[1];
-                if (crc16(encrypted, data_len) != received_crc)
-                {
-                    ESP_LOGE(TAG, "CRC check failed");
-                    free(encrypted);
-                    continue;
-                }
-
-                // 构造消息
-                message_t message = {
-                    .itf = msg.itf,
-                    .message_type = (type[0] << 8) | type[1],
-                    .message_len = data_len};
-                memcpy(message.message_id, id, ID_SIZE);
-                memcpy(message.pubkey, pubkey, PUBKEY_SIZE);
-                memcpy(message.iv, iv, IV_SIZE);
-                message.message = malloc(data_len);
-                if (message.message)
-                {
-                    memcpy(message.message, encrypted, data_len);
-                    // 发送到队列
-                    if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(100)) != pdPASS)
-                    {
-                        ESP_LOGE(TAG, "Failed to send message to queue");
-                        free(message.message);
-                    }
-                }
-                else
-                {
-                    ESP_LOGE(TAG, "Failed to allocate message buffer");
-                }
-
-                free(encrypted);
-            }
-        }
-    }
-}
-
 void app_main(void)
 {
     // 关闭所有日志输出
@@ -839,7 +876,6 @@ void app_main(void)
 
     // 创建处理消息的 Task
     xTaskCreate(handle_uart_message_task, "handle_uart_message_task", TASK_STACK_SIZE, NULL, 5, NULL);
-    xTaskCreate(handle_usb_message_task, "handle_usb_message_task", TASK_STACK_SIZE, NULL, 5, NULL);
 
     // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
     ESP_LOGI(TAG, "nesigner started");
