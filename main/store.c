@@ -120,12 +120,12 @@ bool loadAllKeyPairs()
             return false;
         }
 
-        // char pubkey_hex[PUBKEY_LEN * 2 + 1] = {0};
-        // bin_to_hex(new_pairs[i].pubkey, PUBKEY_LEN, pubkey_hex);
-        // char aeskey_hex[AES_KEY_LEN * 2 + 1] = {0};
-        // bin_to_hex(new_pairs[i].aesKey, AES_KEY_LEN, aeskey_hex);
-        // printf("Loaded Pubkey: %s %s \n", aeskey_hex, pubkey_hex);
-        // printByteArrayAsDec((char *)(new_pairs[i].pubkey), PUBKEY_LEN);
+        char pubkey_hex[PUBKEY_LEN * 2 + 1] = {0};
+        bin_to_hex(new_pairs[i].pubkey, PUBKEY_LEN, pubkey_hex);
+        char aeskey_hex[AES_KEY_LEN * 2 + 1] = {0};
+        bin_to_hex(new_pairs[i].aesKey, AES_KEY_LEN, aeskey_hex);
+        printf("Loaded Pubkey: %s %s \n", aeskey_hex, pubkey_hex);
+        printByteArrayAsDec((char *)(new_pairs[i].pubkey), PUBKEY_LEN);
     }
 
     free(keypairs);
@@ -293,6 +293,9 @@ void initStorage()
 {
     esp_err_t ret = nvs_flash_init();
     ESP_ERROR_CHECK(ret);
+
+    // clean all data, this is for test!!!
+    // nvs_flash_erase();
 
     if (!loadAllKeyPairs())
     {

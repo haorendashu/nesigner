@@ -264,7 +264,7 @@ void send_response_with_encrypt(uint8_t itf, uint8_t *aesKey, uint16_t message_r
 }
 
 // 处理消息的 Task
-void handle_uart_message_task(void *pvParameters)
+void handle_message_task(void *pvParameters)
 {
     while (1)
     {
@@ -306,6 +306,7 @@ void handle_uart_message_task(void *pvParameters)
                 }
 
                 char *decrypted_content = NULL;
+                printByteArrayAsDec(msg.message, msg.message_len);
                 char encrypted_content[msg.message_len + 1] = {};
                 memcpy(encrypted_content, msg.message, msg.message_len);
                 encrypted_content[msg.message_len] = 0;
@@ -314,19 +315,19 @@ void handle_uart_message_task(void *pvParameters)
                     goto sendillegal;
                 }
 
-                uint8_t private_key_bin[PRIVATE_KEY_LEN];
-                uint8_t aes_key_bin[AES_KEY_LEN];
-                memcpy(private_key_bin, decrypted_content, PRIVATE_KEY_LEN);
-                memcpy(aes_key_bin, decrypted_content + PRIVATE_KEY_LEN, AES_KEY_LEN);
+                uint8_t private_key_hex[PRIVATE_KEY_LEN * 2 + 1];
+                uint8_t aes_key_hex[AES_KEY_LEN * 2 + 1];
+                private_key_hex[PRIVATE_KEY_LEN * 2] = 0;
+                aes_key_hex[AES_KEY_LEN * 2] = 0;
+                memcpy(private_key_hex, decrypted_content, PRIVATE_KEY_LEN * 2);
+                memcpy(aes_key_hex, decrypted_content + PRIVATE_KEY_LEN * 2, AES_KEY_LEN * 2);
 
-                // char private_key_hex[PRIVATE_KEY_LEN * 2 + 1] = {};
-                // private_key_hex[PRIVATE_KEY_LEN * 2] = 0;
-                // bin_to_hex(private_key_bin, PRIVATE_KEY_LEN, private_key_hex);
-                // char aes_key_hex[AES_KEY_LEN * 2 + 1] = {};
-                // aes_key_hex[AES_KEY_LEN * 2] = 0;
-                // bin_to_hex(aes_key_bin, AES_KEY_LEN, aes_key_hex);
+                char private_key_bin[PRIVATE_KEY_LEN] = {};
+                hex_to_bin(private_key_hex, private_key_bin, PRIVATE_KEY_LEN);
+                char aes_key_bin[AES_KEY_LEN] = {};
+                hex_to_bin(aes_key_hex, aes_key_bin, AES_KEY_LEN);
 
-                // ESP_LOGI("Test", "private_key_hex %s aes_key_hex %s", private_key_hex, aes_key_hex);
+                ESP_LOGI("Test", "private_key_hex %s aes_key_hex %s", private_key_hex, aes_key_hex);
 
                 KeyPair *keyPair = malloc(sizeof(KeyPair));
                 memcpy(keyPair->aesKey, aes_key_bin, AES_KEY_LEN);
@@ -355,8 +356,8 @@ void handle_uart_message_task(void *pvParameters)
                     if (aes_decrypt_padded(keypair.aesKey, 16, msg.iv, msg.message, msg.message_len,
                                            &decrypted, &decrypted_len) != 0)
                     {
-                        ESP_LOGE("NIP04", "AES decryption failed");
-                        goto sendillegal;
+                        ESP_LOGE(TAG, "AES decryption failed");
+                        continue;
                     }
                     printByteArrayAsDec((char *)decrypted, decrypted_len);
 
@@ -732,28 +733,6 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         if (usb_msg_buffer_size < offset + data_len)
             return; // 数据不足，等待更多
 
-        uint8_t *encrypted = malloc(data_len);
-        if (!encrypted)
-        {
-            ESP_LOGE(TAG, "Failed to allocate memory for encrypted data");
-            return;
-        }
-        memcpy(encrypted, usb_msg_buffer + offset, data_len);
-        offset += data_len;
-
-        // copy remain data to buffer
-        usb_msg_buffer_size -= offset; // remain data size
-        memcpy(usb_msg_buffer, usb_msg_buffer + offset, usb_msg_buffer_size);
-
-        // 验证CRC
-        uint16_t received_crc = (crc[0] << 8) | crc[1];
-        if (crc16(encrypted, data_len) != received_crc)
-        {
-            ESP_LOGE(TAG, "CRC check failed");
-            free(encrypted);
-            return;
-        }
-
         // 构造消息
         message_t message = {
             .itf = itf,
@@ -762,23 +741,39 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         memcpy(message.message_id, id, ID_SIZE);
         memcpy(message.pubkey, pubkey, PUBKEY_SIZE);
         memcpy(message.iv, iv, IV_SIZE);
-        message.message = malloc(data_len);
-        if (message.message)
+
+        if (data_len > 0)
         {
-            memcpy(message.message, encrypted, data_len);
-            // 发送到队列
-            if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(100)) != pdPASS)
+            // content not null. check crc and copy to message content!
+            message.message = malloc(data_len);
+            if (!message.message)
             {
-                ESP_LOGE(TAG, "Failed to send message to queue");
+                ESP_LOGE(TAG, "Failed to allocate memory for encrypted data");
+                return;
+            }
+            memcpy(message.message, usb_msg_buffer + offset, data_len);
+            offset += data_len;
+
+            // 验证CRC
+            uint16_t received_crc = (crc[0] << 8) | crc[1];
+            if (crc16(message.message, data_len) != received_crc)
+            {
+                ESP_LOGE(TAG, "CRC check failed");
                 free(message.message);
+                return;
             }
         }
-        else
-        {
-            ESP_LOGE(TAG, "Failed to allocate message buffer");
-        }
 
-        free(encrypted);
+        // copy remain data to buffer
+        usb_msg_buffer_size -= offset; // remain data size
+        memcpy(usb_msg_buffer, usb_msg_buffer + offset, usb_msg_buffer_size);
+
+        // 发送到队列
+        if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(100)) != pdPASS)
+        {
+            ESP_LOGE(TAG, "Failed to send message to queue");
+            free(message.message);
+        }
     }
     else
     {
@@ -875,7 +870,7 @@ void app_main(void)
     usb_config();
 
     // 创建处理消息的 Task
-    xTaskCreate(handle_uart_message_task, "handle_uart_message_task", TASK_STACK_SIZE, NULL, 5, NULL);
+    xTaskCreate(handle_message_task, "handle_message_task", TASK_STACK_SIZE, NULL, 5, NULL);
 
     // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
     ESP_LOGI(TAG, "nesigner started");
