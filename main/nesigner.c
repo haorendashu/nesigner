@@ -32,6 +32,7 @@
 #define READ_TIMEOUT_MS 10000    // 读取超时时间（毫秒）
 #define TASK_STACK_SIZE 4096     // Task 栈大小
 #define QUEUE_SIZE 10            // 消息队列大小
+#define ITF_MAX 255              // itf can't over this num
 
 static const char *TAG = "NESIGNER";
 
@@ -136,7 +137,7 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
         (message_len >> 8) & 0xFF,
         message_len & 0xFF};
 
-    if (itf == -1)
+    if (itf >= ITF_MAX)
     {
         // send by uart
         uart_write_bytes(UART_PORT_NUM, (char *)&type_bin, TYPE_SIZE);
@@ -186,58 +187,6 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
         {
             ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
         }
-
-        // size_t buffer_size = TYPE_SIZE + ID_SIZE + RESULT_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE + message_len;
-        // uint8_t *buffer = malloc(buffer_size);
-
-        // memcpy(buffer, type_bin, TYPE_SIZE);
-        // memcpy(buffer + TYPE_SIZE, message_id, ID_SIZE);
-        // memcpy(buffer + ID_SIZE, &result_bin, RESULT_SIZE);
-        // memcpy(buffer + RESULT_SIZE, pubkey, PUBKEY_SIZE);
-        // memcpy(buffer + PUBKEY_SIZE, iv, IV_SIZE);
-        // if (message_len > 0 && message != NULL)
-        // {
-        //     uint16_t crc = crc16(message, message_len);
-        //     uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
-        //     memcpy(buffer + IV_SIZE, crc_bytes, CRC_SIZE);
-        //     memcpy(buffer + CRC_SIZE, header, HEADER_SIZE);
-        //     memcpy(buffer + HEADER_SIZE, message, message_len);
-        // }
-        // else
-        // {
-        //     char empty_crc[2] = {0};
-        //     memcpy(buffer + IV_SIZE, empty_crc, CRC_SIZE);
-        //     memcpy(buffer + CRC_SIZE, header, HEADER_SIZE);
-        // }
-
-        // printByteArrayAsDec(buffer, buffer_size);
-
-        // // send by usb
-        // // ESP_LOGI(TAG, "buffer_size: %d CONFIG_TINYUSB_CDC_RX_BUFSIZE", buffer_size, CONFIG_TINYUSB_CDC_RX_BUFSIZE);
-        // // size_t sended_size = 0;
-        // // const size_t max_chunk_size = 64;
-        // // while (sended_size < buffer_size)
-        // // {
-        // //     size_t current_send_size = sended_size + max_chunk_size > buffer_size ? buffer_size - sended_size : max_chunk_size;
-        // //     size_t current_sended_size = tinyusb_cdcacm_write_queue(itf, buffer + sended_size, current_send_size);
-        // //     ESP_LOGI(TAG, "itf %d current_send_size %d current_sended_size: %d sended_size %d", itf, current_send_size, current_sended_size, sended_size);
-        // //     sended_size += current_sended_size;
-        // // }
-        // // esp_err_t err = tinyusb_cdcacm_write_flush(itf, 1000);
-        // // if (err != ESP_OK)
-        // // {
-        // //     ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
-        // // }
-
-        // ESP_LOGI(TAG, "buffer_size: %d CONFIG_TINYUSB_CDC_RX_BUFSIZE", buffer_size, CONFIG_TINYUSB_CDC_RX_BUFSIZE);
-        // size_t sended_size = tinyusb_cdcacm_write_queue(itf, buffer, buffer_size);
-        // ESP_LOGI(TAG, "USB write size: %d", sended_size);
-        // esp_err_t err = tinyusb_cdcacm_write_flush(itf, 0);
-        // if (err != ESP_OK)
-        // {
-        //     ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
-        // }
-        // free(buffer);
     }
 }
 
@@ -271,12 +220,12 @@ void handle_message_task(void *pvParameters)
         message_t msg;
         if (xQueueReceive(message_queue, &msg, portMAX_DELAY))
         {
-            ESP_LOGI(TAG, "msg received from queue");
+            // ESP_LOGI(TAG, "msg received from queue");
 
             uint8_t iv[IV_SIZE];
             generate_random_iv(iv);
 
-            printf("message_type %d\n", msg.message_type);
+            // printf("message_type %d\n", msg.message_type);
 
             if (msg.message_type == MSG_TYPE_PING)
             {
@@ -306,7 +255,7 @@ void handle_message_task(void *pvParameters)
                 }
 
                 char *decrypted_content = NULL;
-                printByteArrayAsDec(msg.message, msg.message_len);
+                // printByteArrayAsDec(msg.message, msg.message_len);
                 char encrypted_content[msg.message_len + 1] = {};
                 memcpy(encrypted_content, msg.message, msg.message_len);
                 encrypted_content[msg.message_len] = 0;
@@ -327,7 +276,7 @@ void handle_message_task(void *pvParameters)
                 char aes_key_bin[AES_KEY_LEN] = {};
                 hex_to_bin(aes_key_hex, aes_key_bin, AES_KEY_LEN);
 
-                ESP_LOGI("Test", "private_key_hex %s aes_key_hex %s", private_key_hex, aes_key_hex);
+                // ESP_LOGI("Test", "private_key_hex %s aes_key_hex %s", private_key_hex, aes_key_hex);
 
                 KeyPair *keyPair = malloc(sizeof(KeyPair));
                 memcpy(keyPair->aesKey, aes_key_bin, AES_KEY_LEN);
@@ -359,13 +308,13 @@ void handle_message_task(void *pvParameters)
                         ESP_LOGE(TAG, "AES decryption failed");
                         continue;
                     }
-                    printByteArrayAsDec((char *)decrypted, decrypted_len);
+                    // printByteArrayAsDec((char *)decrypted, decrypted_len);
 
                     if (memcmp(decrypted, msg.iv, IV_SIZE) == 0)
                     {
                         // If the decrypt content equal iv, find the aesKey!
                         free(decrypted);
-                        printf("find key!\n");
+                        // printf("find key!\n");
 
                         // char pubkey_hex[PUBKEY_LEN * 2 + 1] = {};
                         // pubkey_hex[PUBKEY_LEN * 2] = 0;
@@ -379,16 +328,16 @@ void handle_message_task(void *pvParameters)
                         }
                         else if (msg.message_type == MSG_TYPE_REMOVE_KEY)
                         {
-                            printf("begin to remove kp\n");
+                            // printf("begin to remove kp\n");
                             if (removeAndSaveKeyPair(keypair.aesKey))
                             {
-                                printf("remove success \n");
+                                // printf("remove success \n");
                                 send_response(msg.itf, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, NULL, 0);
                                 goto cleanup;
                             }
                             else
                             {
-                                printf("remove fail \n");
+                                // printf("remove fail \n");
                                 goto sendfail;
                             }
                         }
@@ -556,31 +505,31 @@ void uart_data_receive()
         if (!read_fixed_length_data(id, ID_SIZE, READ_TIMEOUT_MS))
             continue;
 
-        printByteArrayAsDec((char *)id, ID_SIZE);
+        // printByteArrayAsDec((char *)id, ID_SIZE);
 
         // 读取二进制pubkey
         if (!read_fixed_length_data(pubkey, PUBKEY_SIZE, READ_TIMEOUT_MS))
             continue;
 
-        printByteArrayAsDec((char *)pubkey, PUBKEY_SIZE);
+        // printByteArrayAsDec((char *)pubkey, PUBKEY_SIZE);
 
         // 读取二进制iv
         if (!read_fixed_length_data(iv, IV_SIZE, READ_TIMEOUT_MS))
             continue;
 
-        printByteArrayAsDec((char *)iv, IV_SIZE);
+        // printByteArrayAsDec((char *)iv, IV_SIZE);
 
         // 读取二进制crc
         if (!read_fixed_length_data(crc, CRC_SIZE, READ_TIMEOUT_MS))
             continue;
 
-        printByteArrayAsDec((char *)crc, CRC_SIZE);
+        // printByteArrayAsDec((char *)crc, CRC_SIZE);
 
         // 读取消息头
         if (!read_fixed_length_data(header, HEADER_SIZE, READ_TIMEOUT_MS))
             continue;
 
-        printByteArrayAsDec((char *)header, HEADER_SIZE);
+        // printByteArrayAsDec((char *)header, HEADER_SIZE);
 
         // 解析消息头，获取消息长度
         uint32_t total_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
@@ -607,7 +556,7 @@ void uart_data_receive()
 
         // 构造消息
         message_t msg = {
-            .itf = -1,
+            .itf = ITF_MAX,
             .message_type = message_type,
             .message_len = total_len};
         memcpy(msg.message_id, id, ID_SIZE);
@@ -678,7 +627,7 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
     if (ret == ESP_OK)
     {
         // /* Print received data*/
-        // ESP_LOGI(TAG, "Data from channel %d:", itf);
+        ESP_LOGI(TAG, "Data from channel %d:", itf);
         // ESP_LOG_BUFFER_HEXDUMP(TAG, rx_buf, rx_size, ESP_LOG_INFO);
 
         // /* write back */
@@ -692,7 +641,7 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         memcpy(usb_msg_buffer + usb_msg_buffer_size, rx_buf, rx_size);
         usb_msg_buffer_size += rx_size;
 
-        ESP_LOGI(TAG, "message size %d %d", usb_msg_buffer_size, (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE));
+        // ESP_LOGI(TAG, "message size %d %d", usb_msg_buffer_size, (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE));
         if (usb_msg_buffer_size < (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE))
         {
             return;
@@ -727,7 +676,7 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         // 解析数据长度
         uint32_t data_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
 
-        ESP_LOGI(TAG, "data_len %d", data_len);
+        // ESP_LOGI(TAG, "data_len %d", data_len);
 
         // 检查是否有足够的数据读取加密内容
         if (usb_msg_buffer_size < offset + data_len)
