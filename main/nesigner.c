@@ -627,7 +627,7 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
     if (ret == ESP_OK)
     {
         // /* Print received data*/
-        ESP_LOGI(TAG, "Data from channel %d:", itf);
+        // ESP_LOGI(TAG, "Data from channel %d:", itf);
         // ESP_LOG_BUFFER_HEXDUMP(TAG, rx_buf, rx_size, ESP_LOG_INFO);
 
         // /* write back */
@@ -747,12 +747,17 @@ void tinyusb_cdc_line_state_changed_callback(int itf, cdcacm_event_t *event)
 
 void usb_config()
 {
-    char *string_descriptor = "nesigner";
-    const char *str_ptr = string_descriptor;
+    // 定义字符串描述符数组，索引0通常是语言ID，后续为各字符串
+    static const char *string_desc_arr[] = {
+        [0] = "",            // 语言ID（通常为空）
+        [1] = "haorendashu", // iManufacturer（索引1）
+        [2] = "nesigner",    // iProduct（索引2）
+        [3] = "123456"       // iSerialNumber（索引3）
+    };
 
     const tinyusb_config_t tusb_cfg = {
         .device_descriptor = &descriptor_dev,
-        .string_descriptor = &str_ptr,
+        .string_descriptor = string_desc_arr,
         .external_phy = false,
 #if (TUD_OPT_HIGH_SPEED)
         .fs_configuration_descriptor = NULL,
