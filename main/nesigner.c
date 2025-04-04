@@ -421,10 +421,6 @@ void handle_message_task(void *pvParameters)
                     goto sendillegal;
                 }
 
-                char id_hex[NOSTR_EVENT_ID_BIN_LEN * 2 + 1];
-                bin_to_hex(decrypted, NOSTR_EVENT_ID_BIN_LEN, id_hex);
-                ESP_LOGI(TAG, "EVENT Sign Id: %s", id_hex);
-
                 uint8_t sig_bin[NOSTR_EVENT_SIG_BIN_LEN];
 
                 if (sign(keypair->privateKey, decrypted, sig_bin) != 0)
@@ -432,10 +428,6 @@ void handle_message_task(void *pvParameters)
                     free(decrypted);
                     goto sendfail;
                 }
-
-                char sig_hex[NOSTR_EVENT_SIG_BIN_LEN * 2 + 1];
-                bin_to_hex(sig_bin, NOSTR_EVENT_SIG_BIN_LEN, sig_hex);
-                ESP_LOGI(TAG, "EVENT Sign: %s", sig_hex);
 
                 send_response_with_encrypt(msg.itf, keypair->aesKey, MSG_RESULT_OK, msg.message_type, msg.message_id, msg.pubkey, iv, sig_bin, NOSTR_EVENT_SIG_BIN_LEN);
             }
