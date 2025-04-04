@@ -208,15 +208,6 @@ int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
     return 0;
 }
 
-// 字节序转换：小端序转大端序
-static void bytes_native_to_big_endian(const uint8_t *input, uint8_t *output, size_t len)
-{
-    for (size_t i = 0; i < len; i++)
-    {
-        output[i] = input[len - 1 - i];
-    }
-}
-
 // Tagged Hash 实现
 static void tagged_hash(const char *tag, const uint8_t *data, size_t data_len, uint8_t *hash_output)
 {
@@ -231,29 +222,6 @@ static void tagged_hash(const char *tag, const uint8_t *data, size_t data_len, u
     mbedtls_sha256_update(&ctx, data, data_len);
     mbedtls_sha256_finish(&ctx, hash_output);
     mbedtls_sha256_free(&ctx);
-}
-
-// MPI 异或操作（兼容 mbedtls 版本）
-static int mpi_xor(mbedtls_mpi *X, const mbedtls_mpi *A, const mbedtls_mpi *B)
-{
-    int ret = 0;
-    uint8_t a_bytes[32], b_bytes[32], xor_bytes[32];
-
-    // 将 MPI 转换为固定32字节的小端序格式
-    MBEDTLS_MPI_CHK(mbedtls_mpi_write_binary(A, a_bytes, 32));
-    MBEDTLS_MPI_CHK(mbedtls_mpi_write_binary(B, b_bytes, 32));
-
-    // 按字节执行异或操作
-    for (int i = 0; i < 32; i++)
-    {
-        xor_bytes[i] = a_bytes[i] ^ b_bytes[i];
-    }
-
-    // 将结果写回 MPI
-    MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(X, xor_bytes, 32));
-
-cleanup:
-    return ret;
 }
 
 int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bin)
