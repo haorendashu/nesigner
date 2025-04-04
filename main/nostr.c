@@ -208,150 +208,149 @@ int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
     return 0;
 }
 
-// 签名函数
+// 字节序转换：小端序转大端序
+static void bytes_native_to_big_endian(const uint8_t *input, uint8_t *output, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+    {
+        output[i] = input[len - 1 - i];
+    }
+}
+
+// Tagged Hash 实现
+static void tagged_hash(const char *tag, const uint8_t *data, size_t data_len, uint8_t *hash_output)
+{
+    uint8_t tag_hash[32];
+    mbedtls_sha256((const uint8_t *)tag, strlen(tag), tag_hash, 0);
+
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0);
+    mbedtls_sha256_update(&ctx, tag_hash, 32);
+    mbedtls_sha256_update(&ctx, tag_hash, 32);
+    mbedtls_sha256_update(&ctx, data, data_len);
+    mbedtls_sha256_finish(&ctx, hash_output);
+    mbedtls_sha256_free(&ctx);
+}
+
+// MPI 异或操作（兼容 mbedtls 版本）
+static int mpi_xor(mbedtls_mpi *X, const mbedtls_mpi *A, const mbedtls_mpi *B)
+{
+    int ret = 0;
+    uint8_t a_bytes[32], b_bytes[32], xor_bytes[32];
+
+    // 将 MPI 转换为固定32字节的小端序格式
+    MBEDTLS_MPI_CHK(mbedtls_mpi_write_binary(A, a_bytes, 32));
+    MBEDTLS_MPI_CHK(mbedtls_mpi_write_binary(B, b_bytes, 32));
+
+    // 按字节执行异或操作
+    for (int i = 0; i < 32; i++)
+    {
+        xor_bytes[i] = a_bytes[i] ^ b_bytes[i];
+    }
+
+    // 将结果写回 MPI
+    MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(X, xor_bytes, 32));
+
+cleanup:
+    return ret;
+}
+
 int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bin)
 {
     mbedtls_ecp_group grp;
-    mbedtls_ecp_point r;
+    mbedtls_ecp_point R, P;
     mbedtls_mpi d, k, e, s;
     mbedtls_ctr_drbg_context ctr_drbg;
+    int ret = -1;
 
-    // 初始化加密上下文
+    // Initialize cryptographic context
     if (init_crypto_context(&grp, &ctr_drbg) != 0)
     {
         return -1;
     }
 
-    // 初始化所有变量
-    mbedtls_ecp_point_init(&r);
+    // Initialize all variables
+    mbedtls_ecp_point_init(&R);
+    mbedtls_ecp_point_init(&P);
     mbedtls_mpi_init(&d);
     mbedtls_mpi_init(&k);
     mbedtls_mpi_init(&e);
     mbedtls_mpi_init(&s);
 
-    // 1. 读取私钥
-    mbedtls_mpi_read_binary(&d, privkey_bin, 32);
+    // 1. Read private key
+    MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(&d, privkey_bin, 32));
 
-    // 2. 确定性地生成随机数 k
-    uint8_t t[32];
-    uint8_t k_bin[32];
-    memcpy(t, privkey_bin, 32);
-    mbedtls_sha256_context sha256_ctx;
-    mbedtls_sha256_init(&sha256_ctx);
-    mbedtls_sha256_starts(&sha256_ctx, 0);
-    mbedtls_sha256_update(&sha256_ctx, t, 32);
-    mbedtls_sha256_update(&sha256_ctx, message_bin, 32);
-    mbedtls_sha256_finish(&sha256_ctx, k_bin);
-    mbedtls_sha256_free(&sha256_ctx);
+    // 2. Generate public key P = d * G
+    MBEDTLS_MPI_CHK(mbedtls_ecp_mul(&grp, &P, &d, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg));
 
-    mbedtls_mpi_read_binary(&k, k_bin, 32);
-    mbedtls_mpi_mod_mpi(&k, &k, &grp.N);
-
-    // 确保 k 在有效范围内：1 <= k < N
-    if (mbedtls_mpi_cmp_int(&k, 0) <= 0 ||
-        mbedtls_mpi_cmp_mpi(&k, &grp.N) >= 0)
-    {
-        ESP_LOGE("Nostr", "Generated k is out of range");
-        goto cleanup;
-    }
-
-    // 3. 计算 R = k*G
-    if (mbedtls_ecp_mul(&grp, &r, &k, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg) != 0)
-    {
-        ESP_LOGE("Nostr", "ECP multiply failed");
-        goto cleanup;
-    }
-
-    // 4. 获取 R 的压缩表示
-    uint8_t r_bin[33];
+    // Get public key in compressed format
+    uint8_t pubkey[33];
     size_t olen;
-    if (mbedtls_ecp_point_write_binary(&grp, &r, MBEDTLS_ECP_PF_COMPRESSED,
-                                       &olen, r_bin, sizeof(r_bin)) != 0)
+    MBEDTLS_MPI_CHK(mbedtls_ecp_point_write_binary(&grp, &P, MBEDTLS_ECP_PF_COMPRESSED,
+                                                   &olen, pubkey, sizeof(pubkey)));
+
+    // Check if we need to negate private key (if public key Y is odd)
+    if (pubkey[0] == 0x03)
     {
-        ESP_LOGE("Nostr", "Failed to write R");
-        goto cleanup;
+        mbedtls_mpi_sub_mpi(&d, &grp.N, &d);
     }
 
-    // 如果 R.y 是奇数，调整 k = N - k 并重新计算 R
-    if (r_bin[0] == 0x03)
+    // 3. Generate deterministic k
+    uint8_t nonce_input[32 + 32 + 32];
+    memcpy(nonce_input, pubkey + 1, 32);       // Public key X
+    memcpy(nonce_input + 32, privkey_bin, 32); // Private key
+    memcpy(nonce_input + 64, message_bin, 32); // Message
+
+    uint8_t k_bytes[32];
+    tagged_hash("BIP0340/nonce", nonce_input, sizeof(nonce_input), k_bytes);
+    MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(&k, k_bytes, 32));
+    MBEDTLS_MPI_CHK(mbedtls_mpi_mod_mpi(&k, &k, &grp.N));
+
+    // 4. Calculate R = k * G
+    MBEDTLS_MPI_CHK(mbedtls_ecp_mul(&grp, &R, &k, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg));
+
+    // Get R in compressed format and check if we need to negate k
+    uint8_t R_bytes[33];
+    MBEDTLS_MPI_CHK(mbedtls_ecp_point_write_binary(&grp, &R, MBEDTLS_ECP_PF_COMPRESSED,
+                                                   &olen, R_bytes, sizeof(R_bytes)));
+
+    if (R_bytes[0] == 0x03)
     {
         mbedtls_mpi_sub_mpi(&k, &grp.N, &k);
-        mbedtls_mpi_mod_mpi(&k, &k, &grp.N);
-
-        // 确保调整后的 k 在有效范围内：1 <= k < N
-        if (mbedtls_mpi_cmp_int(&k, 0) <= 0 ||
-            mbedtls_mpi_cmp_mpi(&k, &grp.N) >= 0)
-        {
-            ESP_LOGE("Nostr", "Adjusted k is out of range");
-            goto cleanup;
-        }
-
-        // 重新计算 R = k*G
-        if (mbedtls_ecp_mul(&grp, &r, &k, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg) != 0)
-        {
-            ESP_LOGE("Nostr", "ECP multiply failed after k adjustment");
-            goto cleanup;
-        }
-
-        // 重新获取压缩表示
-        if (mbedtls_ecp_point_write_binary(&grp, &r, MBEDTLS_ECP_PF_COMPRESSED,
-                                           &olen, r_bin, sizeof(r_bin)) != 0)
-        {
-            ESP_LOGE("Nostr", "Failed to write adjusted R");
-            goto cleanup;
-        }
-
-        // 确认调整后的 R.y 是偶数
-        if (r_bin[0] != 0x02)
-        {
-            ESP_LOGE("Nostr", "Adjusted R.y is still odd");
-            goto cleanup;
-        }
     }
 
-    // 5. 计算公钥 P = d*G (仅需要 x 坐标)
-    uint8_t pub_x[32];
-    if (get_public(privkey_bin, pub_x) != 0)
-    {
-        ESP_LOGE("Nostr", "Failed to get public key");
-        goto cleanup;
-    }
+    // 5. Calculate challenge e = tagged_hash(R.x || P.x || msg)
+    uint8_t challenge_input[32 + 32 + 32];
+    memcpy(challenge_input, R_bytes + 1, 32);      // R.x
+    memcpy(challenge_input + 32, pubkey + 1, 32);  // P.x
+    memcpy(challenge_input + 64, message_bin, 32); // msg
 
-    // 6. 计算挑战哈希 e = H(R.x || P.x || m)
-    uint8_t hash_input[32 + 32 + 32];         // R.x(32) + P.x(32) + message(32)
-    memcpy(hash_input, r_bin + 1, 32);        // 跳过压缩标志字节，取 R.x
-    memcpy(hash_input + 32, pub_x, 32);       // P.x
-    memcpy(hash_input + 64, message_bin, 32); // message
+    uint8_t e_bytes[32];
+    tagged_hash("BIP0340/challenge", challenge_input, sizeof(challenge_input), e_bytes);
+    MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(&e, e_bytes, 32));
 
-    uint8_t hash[32];
-    mbedtls_sha256_init(&sha256_ctx);
-    mbedtls_sha256_starts(&sha256_ctx, 0);
-    mbedtls_sha256_update(&sha256_ctx, hash_input, sizeof(hash_input));
-    mbedtls_sha256_finish(&sha256_ctx, hash);
-    mbedtls_sha256_free(&sha256_ctx);
+    // 6. Calculate s = k + e * d mod n
+    MBEDTLS_MPI_CHK(mbedtls_mpi_mul_mpi(&s, &e, &d));
+    MBEDTLS_MPI_CHK(mbedtls_mpi_add_mpi(&s, &k, &s));
+    MBEDTLS_MPI_CHK(mbedtls_mpi_mod_mpi(&s, &s, &grp.N));
 
-    // 将哈希结果转换为大整数 e
-    mbedtls_mpi_read_binary(&e, hash, sizeof(hash));
+    // 7. Output signature (R.x || s)
+    memcpy(sig_bin, R_bytes + 1, 32);                                // First 32 bytes: R.x
+    MBEDTLS_MPI_CHK(mbedtls_mpi_write_binary(&s, sig_bin + 32, 32)); // Last 32 bytes: s
 
-    // 7. 计算 s = k + e*d mod N
-    mbedtls_mpi_mul_mpi(&e, &e, &d);     // e = e*d
-    mbedtls_mpi_add_mpi(&s, &k, &e);     // s = k + e*d
-    mbedtls_mpi_mod_mpi(&s, &s, &grp.N); // s mod N
-
-    // 8. 构建签名 (R.x || s)
-    memcpy(sig_bin, r_bin + 1, 32);                 // R.x (跳过压缩标志字节)
-    mbedtls_mpi_write_binary(&s, sig_bin + 32, 32); // s
+    ret = 0; // Success
 
 cleanup:
-    // 释放所有资源
     mbedtls_ecp_group_free(&grp);
-    mbedtls_ecp_point_free(&r);
+    mbedtls_ecp_point_free(&R);
+    mbedtls_ecp_point_free(&P);
     mbedtls_mpi_free(&d);
     mbedtls_mpi_free(&k);
     mbedtls_mpi_free(&e);
     mbedtls_mpi_free(&s);
     mbedtls_ctr_drbg_free(&ctr_drbg);
-    return 0;
+    return ret;
 }
 
 // Base64 编码函数（使用mbedtls实现）
