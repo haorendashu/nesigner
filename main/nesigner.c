@@ -786,6 +786,20 @@ void tinyusb_cdc_line_state_changed_callback(int itf, cdcacm_event_t *event)
     ESP_LOGI(TAG, "Line state changed on channel %d: DTR:%d, RTS:%d", itf, dtr, rts);
 }
 
+static uint8_t const desc_configuration[] = {
+    // Config number, interface count, string index, total length, attribute, power in mA
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, (TUD_CDC_DESC_LEN), TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+
+    // CDC Interface
+    TUD_CDC_DESCRIPTOR(1,    // Interface number (使用0作为主接口)
+                       4,    // String index for interface
+                       0x81, // EP notification address
+                       64,   // EP notification size
+                       0x82, // EP OUT address
+                       0x02, // EP IN addres
+                       64)   // EP size (64 bytes)
+};
+
 void usb_config()
 {
     // 定义字符串描述符数组，索引0通常是语言ID，后续为各字符串
@@ -800,6 +814,7 @@ void usb_config()
         .device_descriptor = &descriptor_dev,
         .string_descriptor = string_desc_arr,
         .external_phy = false,
+        .configuration_descriptor = desc_configuration,
 #if (TUD_OPT_HIGH_SPEED)
         .fs_configuration_descriptor = NULL,
         .hs_configuration_descriptor = NULL,
