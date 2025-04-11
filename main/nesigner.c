@@ -804,10 +804,11 @@ void usb_config()
 {
     // 定义字符串描述符数组，索引0通常是语言ID，后续为各字符串
     static const char *string_desc_arr[] = {
-        [0] = "",            // 语言ID（通常为空）
-        [1] = "haorendashu", // iManufacturer（索引1）
-        [2] = "nesigner",    // iProduct（索引2）
-        [3] = "123456"       // iSerialNumber（索引3）
+        [0] = "",               // 语言ID（通常为空）
+        [1] = "haorendashu",    // iManufacturer（索引1）
+        [2] = "nesigner",       // iProduct（索引2）
+        [3] = "123456",         // iSerialNumber（索引3）
+        [4] = "A nostr signer", // iInterface（索引4）
     };
 
     const tinyusb_config_t tusb_cfg = {
