@@ -40,6 +40,8 @@ static const char *TAG = "NESIGNER";
 // | 2字节类型 | 16字节ID | 32字节PUBKEY | 16字节加密 IV | 4字节长度头 | N字节加密数据 |2字节CRC |
 // Response 消息结构：
 // | 2字节类型 | 16字节ID | 2字节结果 | 32字节PUBKEY | 16字节加密 IV | 4字节长度头 | N字节加密数据 |2字节CRC |
+#define REQUEST_HEAD_LEN 70
+#define RESPONSE_HEAD_LEN 72
 
 // AES配置
 #define AES_KEY_SIZE 256
@@ -701,7 +703,7 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         usb_msg_buffer_size += rx_size;
 
         // 至少需要读取到消息头和长度信息才能继续处理
-        if (usb_msg_buffer_size < (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE))
+        if (usb_msg_buffer_size < REQUEST_HEAD_LEN)
         {
             return;
         }
@@ -734,19 +736,19 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         uint32_t data_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
 
         // 计算整个消息的长度（包含 CRC）
-        size_t whole_msg_len = TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE + data_len + CRC_SIZE;
+        size_t whole_msg_len = REQUEST_HEAD_LEN + data_len + CRC_SIZE;
 
         // 检查是否有足够的数据读取加密内容
-        if (usb_msg_buffer_size < offset + data_len)
+        if (usb_msg_buffer_size < whole_msg_len)
             return; // 数据不足，等待更多
 
         // 读取 CRC
         uint8_t crc[CRC_SIZE];
-        memcpy(crc, usb_msg_buffer + offset + data_len, CRC_SIZE);
+        memcpy(crc, usb_msg_buffer + REQUEST_HEAD_LEN + data_len, CRC_SIZE);
 
         // 验证 CRC
         uint16_t received_crc = (crc[0] << 8) | crc[1];
-        uint16_t computed_crc = crc16(usb_msg_buffer, offset + data_len);
+        uint16_t computed_crc = crc16(usb_msg_buffer, REQUEST_HEAD_LEN + data_len);
         if (computed_crc != received_crc)
         {
             ESP_LOGE(TAG, "CRC check failed");
@@ -776,7 +778,7 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
                 memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
                 return;
             }
-            memcpy(message.message, usb_msg_buffer + offset, data_len);
+            memcpy(message.message, usb_msg_buffer + REQUEST_HEAD_LEN, data_len);
         }
 
         // 移除已处理的数据
