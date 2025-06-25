@@ -37,9 +37,9 @@
 static const char *TAG = "NESIGNER";
 
 // Requst 消息结构：
-// | 2字节类型 | 16字节ID | 32字节PUBKEY | 16字节加密 IV | 2字节CRC | 4字节长度头 | N字节加密数据 |
+// | 2字节类型 | 16字节ID | 32字节PUBKEY | 16字节加密 IV | 4字节长度头 | N字节加密数据 |2字节CRC |
 // Response 消息结构：
-// | 2字节类型 | 16字节ID | 2字节结果 | 32字节PUBKEY | 16字节加密 IV | 2字节CRC | 4字节长度头 | N字节加密数据 |
+// | 2字节类型 | 16字节ID | 2字节结果 | 32字节PUBKEY | 16字节加密 IV | 4字节长度头 | N字节加密数据 |2字节CRC |
 
 // AES配置
 #define AES_KEY_SIZE 256
@@ -121,6 +121,31 @@ bool read_fixed_length_data(uint8_t *buffer, int length, uint64_t timeout_ms)
     return true; // 成功读取
 }
 
+// handle uart send
+void uart_send_data(uint8_t *message, size_t message_len)
+{
+    size_t total_sent = 0;
+    const uint8_t *data_ptr = message;
+    size_t remaining = message_len;
+
+    while (remaining > 0)
+    {
+        // 调用 uart_write_bytes 发送数据
+        size_t send_length = uart_write_bytes(UART_PORT_NUM, (const char *)data_ptr, remaining);
+
+        if (send_length == 0)
+        {
+            // 发送失败，适当延时避免忙等待
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
+        total_sent += send_length;
+        data_ptr += send_length;
+        remaining -= send_length;
+    }
+}
+
 // handle usb send
 void usb_send_data(uint8_t itf, uint8_t *message, int message_len)
 {
@@ -164,67 +189,53 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
         (message_len >> 8) & 0xFF,
         message_len & 0xFF};
 
+    // 创建一个临时缓冲区来存储整个消息
+    size_t whole_msg_len = TYPE_SIZE + ID_SIZE + RESULT_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE + message_len + CRC_SIZE;
+    uint8_t *whole_msg = malloc(whole_msg_len);
+    if (whole_msg == NULL)
+    {
+        return;
+    }
+    size_t offset = 0;
+    memcpy(whole_msg + offset, type_bin, TYPE_SIZE);
+    offset += TYPE_SIZE;
+    memcpy(whole_msg + offset, message_id, ID_SIZE);
+    offset += ID_SIZE;
+    memcpy(whole_msg + offset, result_bin, RESULT_SIZE);
+    offset += RESULT_SIZE;
+    memcpy(whole_msg + offset, pubkey, PUBKEY_SIZE);
+    offset += PUBKEY_SIZE;
+    memcpy(whole_msg + offset, iv, IV_SIZE);
+    offset += IV_SIZE;
+    memcpy(whole_msg + offset, header, HEADER_SIZE);
+    offset += HEADER_SIZE;
+    if (message_len > 0 && message != NULL)
+    {
+        memcpy(whole_msg + offset, message, message_len);
+        offset += message_len;
+    }
+
+    // 计算整个消息的CRC
+    uint16_t crc = crc16(whole_msg, offset);
+    uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
+    memcpy(whole_msg + offset, crc_bytes, CRC_SIZE);
+
     if (itf >= ITF_MAX)
     {
         // send by uart
-        uart_write_bytes(UART_PORT_NUM, (char *)&type_bin, TYPE_SIZE);
-        uart_write_bytes(UART_PORT_NUM, (char *)message_id, ID_SIZE); // 直接发送二进制ID
-        uart_write_bytes(UART_PORT_NUM, (char *)&result_bin, RESULT_SIZE);
-        uart_write_bytes(UART_PORT_NUM, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
-        uart_write_bytes(UART_PORT_NUM, (char *)iv, IV_SIZE);         // 直接发送二进制IV
-        if (message_len > 0 && message != NULL)
-        {
-            uint16_t crc = crc16(message, message_len);
-            uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
-            uart_write_bytes(UART_PORT_NUM, (char *)crc_bytes, CRC_SIZE);  // crc
-            uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE);  // header
-            uart_write_bytes(UART_PORT_NUM, (char *)message, message_len); // content
-        }
-        else
-        {
-            char empty_crc[2] = {0};
-            uart_write_bytes(UART_PORT_NUM, empty_crc, CRC_SIZE);         // crc
-            uart_write_bytes(UART_PORT_NUM, (char *)header, HEADER_SIZE); // header
-        }
+        uart_send_data(whole_msg, whole_msg_len);
     }
     else
     {
-        // send by uart
-        // tinyusb_cdcacm_write_queue(itf, (char *)&type_bin, TYPE_SIZE);
-        usb_send_data(itf, (uint8_t *)&type_bin, TYPE_SIZE);
-        // tinyusb_cdcacm_write_queue(itf, (char *)message_id, ID_SIZE); // 直接发送二进制ID
-        usb_send_data(itf, message_id, ID_SIZE); // 直接发送二进制ID
-        // tinyusb_cdcacm_write_queue(itf, (char *)&result_bin, RESULT_SIZE);
-        usb_send_data(itf, (uint8_t *)&result_bin, RESULT_SIZE);
-        // tinyusb_cdcacm_write_queue(itf, (char *)pubkey, PUBKEY_SIZE); // 发送hex格式
-        usb_send_data(itf, pubkey, PUBKEY_SIZE); // 发送hex格式
-        // tinyusb_cdcacm_write_queue(itf, (char *)iv, IV_SIZE); // 直接发送二进制IV
-        usb_send_data(itf, iv, IV_SIZE); // 直接发送二进制IV
-        if (message_len > 0 && message != NULL)
-        {
-            uint16_t crc = crc16(message, message_len);
-            uint8_t crc_bytes[] = {crc >> 8, crc & 0xFF};
-            // tinyusb_cdcacm_write_queue(itf, (char *)crc_bytes, CRC_SIZE);                       // crc
-            usb_send_data(itf, crc_bytes, CRC_SIZE); // crc
-            // tinyusb_cdcacm_write_queue(itf, (char *)header, HEADER_SIZE);                       // header
-            usb_send_data(itf, header, HEADER_SIZE); // header
-            // size_t send_length = tinyusb_cdcacm_write_queue(itf, (char *)message, message_len); // content
-            usb_send_data(itf, message, message_len); // content
-        }
-        else
-        {
-            char empty_crc[2] = {0};
-            // tinyusb_cdcacm_write_queue(itf, empty_crc, CRC_SIZE);         // crc
-            usb_send_data(itf, empty_crc, CRC_SIZE); // crc
-            // tinyusb_cdcacm_write_queue(itf, (char *)header, HEADER_SIZE); // header
-            usb_send_data(itf, header, HEADER_SIZE); // header
-        }
+        // send by usb
+        usb_send_data(itf, whole_msg, whole_msg_len);
         esp_err_t err = tinyusb_cdcacm_write_flush(itf, 10000);
         if (err != ESP_OK)
         {
             ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
         }
     }
+    free(whole_msg);
 }
 
 void send_response_with_encrypt(uint8_t itf, uint8_t *aesKey, uint16_t message_result, uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
@@ -525,8 +536,8 @@ void uart_data_receive()
     uint8_t id[ID_SIZE];         // 用于存储消息 ID
     uint8_t pubkey[PUBKEY_SIZE]; // 用于Pubkey
     uint8_t iv[IV_SIZE];         // 用于 IV
-    uint8_t crc[CRC_SIZE];       // 用于 CRC
     uint8_t header[HEADER_SIZE]; // 用于存储消息头
+    uint8_t crc[CRC_SIZE];       // 用于 CRC
 
     while (1)
     {
@@ -556,12 +567,6 @@ void uart_data_receive()
 
         // printByteArrayAsDec((char *)iv, IV_SIZE);
 
-        // 读取二进制crc
-        if (!read_fixed_length_data(crc, CRC_SIZE, READ_TIMEOUT_MS))
-            continue;
-
-        // printByteArrayAsDec((char *)crc, CRC_SIZE);
-
         // 读取消息头
         if (!read_fixed_length_data(header, HEADER_SIZE, READ_TIMEOUT_MS))
             continue;
@@ -580,16 +585,45 @@ void uart_data_receive()
             continue;
         }
 
+        // 读取二进制crc
+        if (!read_fixed_length_data(crc, CRC_SIZE, READ_TIMEOUT_MS))
+        {
+            free(encrypted);
+            continue;
+        }
+
+        // printByteArrayAsDec((char *)crc, CRC_SIZE);
+
         // 验证CRC
         uint16_t received_crc = (crc[0] << 8) | crc[1];
-        if (crc16(encrypted, total_len) != received_crc)
+        // 创建一个临时缓冲区来存储整个消息
+        size_t whole_msg_len = TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE + total_len;
+        uint8_t *whole_msg = malloc(whole_msg_len);
+        if (whole_msg == NULL)
+        {
+            free(encrypted);
+            continue;
+        }
+        memcpy(whole_msg, type, TYPE_SIZE);
+        memcpy(whole_msg + TYPE_SIZE, id, ID_SIZE);
+        memcpy(whole_msg + TYPE_SIZE + ID_SIZE, pubkey, PUBKEY_SIZE);
+        memcpy(whole_msg + TYPE_SIZE + ID_SIZE + PUBKEY_SIZE, iv, IV_SIZE);
+        memcpy(whole_msg + TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE, header, HEADER_SIZE);
+        if (total_len > 0)
+        {
+            memcpy(whole_msg + TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE, encrypted, total_len);
+        }
+
+        if (crc16(whole_msg, whole_msg_len) != received_crc)
         {
             char id_hex[ID_SIZE * 2 + 1];
             bin_to_hex(id, ID_SIZE, id_hex);
             ESP_LOGE(TAG, "CRC Error ID: %s", id_hex);
             free(encrypted);
+            free(whole_msg);
             continue;
         }
+        free(whole_msg);
 
         // 构造消息
         message_t msg = {
@@ -663,23 +697,11 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
     esp_err_t ret = tinyusb_cdcacm_read(itf, rx_buf, CONFIG_TINYUSB_CDC_RX_BUFSIZE, &rx_size);
     if (ret == ESP_OK)
     {
-        // /* Print received data*/
-        // ESP_LOGI(TAG, "Data from channel %d:", itf);
-        // ESP_LOG_BUFFER_HEXDUMP(TAG, rx_buf, rx_size, ESP_LOG_INFO);
-
-        // /* write back */
-        // tinyusb_cdcacm_write_queue(itf, rx_buf, rx_size);
-        // esp_err_t err = tinyusb_cdcacm_write_flush(itf, 0);
-        // if (err != ESP_OK)
-        // {
-        //     ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
-        // }
-
         memcpy(usb_msg_buffer + usb_msg_buffer_size, rx_buf, rx_size);
         usb_msg_buffer_size += rx_size;
 
-        // ESP_LOGI(TAG, "message size %d %d", usb_msg_buffer_size, (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE));
-        if (usb_msg_buffer_size < (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + CRC_SIZE + HEADER_SIZE))
+        // 至少需要读取到消息头和长度信息才能继续处理
+        if (usb_msg_buffer_size < (TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE))
         {
             return;
         }
@@ -704,24 +726,35 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         memcpy(iv, usb_msg_buffer + offset, IV_SIZE);
         offset += IV_SIZE;
 
-        uint8_t crc[CRC_SIZE];
-        memcpy(crc, usb_msg_buffer + offset, CRC_SIZE);
-        offset += CRC_SIZE;
-
         uint8_t header[HEADER_SIZE];
         memcpy(header, usb_msg_buffer + offset, HEADER_SIZE);
         offset += HEADER_SIZE;
 
-        // printByteArrayAsDec(header, HEADER_SIZE);
-
         // 解析数据长度
         uint32_t data_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
 
-        // ESP_LOGI(TAG, "data_len %d offset %d usb_msg_buffer_size %d", data_len, offset, usb_msg_buffer_size);
+        // 计算整个消息的长度（包含 CRC）
+        size_t whole_msg_len = TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE + data_len + CRC_SIZE;
 
         // 检查是否有足够的数据读取加密内容
         if (usb_msg_buffer_size < offset + data_len)
             return; // 数据不足，等待更多
+
+        // 读取 CRC
+        uint8_t crc[CRC_SIZE];
+        memcpy(crc, usb_msg_buffer + offset + data_len, CRC_SIZE);
+
+        // 验证 CRC
+        uint16_t received_crc = (crc[0] << 8) | crc[1];
+        uint16_t computed_crc = crc16(usb_msg_buffer, offset + data_len);
+        if (computed_crc != received_crc)
+        {
+            ESP_LOGE(TAG, "CRC check failed");
+            // 移除已处理的数据
+            usb_msg_buffer_size -= whole_msg_len;
+            memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
+            return;
+        }
 
         // 构造消息
         message_t message = {
@@ -734,29 +767,21 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
 
         if (data_len > 0)
         {
-            // content not null. check crc and copy to message content!
             message.message = malloc(data_len);
             if (!message.message)
             {
                 ESP_LOGE(TAG, "Failed to allocate memory for encrypted data");
+                // 移除已处理的数据
+                usb_msg_buffer_size -= whole_msg_len;
+                memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
                 return;
             }
             memcpy(message.message, usb_msg_buffer + offset, data_len);
-            offset += data_len;
-
-            // 验证CRC
-            uint16_t received_crc = (crc[0] << 8) | crc[1];
-            if (crc16(message.message, data_len) != received_crc)
-            {
-                ESP_LOGE(TAG, "CRC check failed");
-                free(message.message);
-                return;
-            }
         }
 
-        // copy remain data to buffer
-        usb_msg_buffer_size -= offset; // remain data size
-        memcpy(usb_msg_buffer, usb_msg_buffer + offset, usb_msg_buffer_size);
+        // 移除已处理的数据
+        usb_msg_buffer_size -= whole_msg_len;
+        memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
 
         // 发送到队列
         if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(100)) != pdPASS)
