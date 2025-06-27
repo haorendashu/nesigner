@@ -154,6 +154,8 @@ void usb_send_data(uint8_t itf, uint8_t *message, int message_len)
     size_t total_sent = 0;
     const uint8_t *data_ptr = (const uint8_t *)message;
     size_t remaining = message_len;
+    uint32_t start_time = esp_timer_get_time() / 1000; // 记录开始时间
+    const uint32_t timeout_ms = 5000;                  // 设置超时时间为 5 秒
 
     while (remaining > 0)
     {
@@ -161,6 +163,12 @@ void usb_send_data(uint8_t itf, uint8_t *message, int message_len)
 
         if (send_length == 0)
         {
+            // 检查是否超时
+            if ((esp_timer_get_time() / 1000 - start_time) >= timeout_ms)
+            {
+                ESP_LOGE(TAG, "USB send timeout");
+                break;
+            }
             // 缓冲区已满，可以延时等待或处理其他任务
             vTaskDelay(pdMS_TO_TICKS(1)); // 适当延时避免忙等待
             continue;
