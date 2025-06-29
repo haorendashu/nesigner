@@ -45,7 +45,7 @@ reload rule:
 sudo udevadm control --reload-rules
 ```
 
-**Windows**, use [Zadig Tool](https://zadig.akeo.ie/) to install WinUSB Driver.
+~~**Windows**, use [Zadig Tool](https://zadig.akeo.ie/) to install WinUSB Driver.~~
 
 
 3. Configure the project:
