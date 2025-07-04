@@ -283,7 +283,7 @@ void handle_message_task(void *pvParameters)
             uint8_t iv[IV_SIZE];
             generate_random_iv(iv);
 
-            // printf("message_type %d\n", msg.message_type);
+            printf("message_type %d\n", msg.message_type);
 
             if (msg.message_type == MSG_TYPE_PING)
             {
@@ -693,6 +693,9 @@ static size_t usb_msg_buffer_size = 0;
 
 static uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE * 4];
 
+// 记录上次接收到数据的时间，单位毫秒
+static uint64_t usb_start_read_time = 0;
+
 /**
  * @brief CDC device RX callback
  *
@@ -703,6 +706,21 @@ static uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE * 4];
  */
 void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
 {
+    // 检查是否超时
+    uint64_t current_time = esp_timer_get_time() / 1000;
+    if (usb_start_read_time > 0 && (current_time - usb_start_read_time) >= READ_TIMEOUT_MS)
+    {
+        ESP_LOGE(TAG, "USB read timeout");
+        // 清除已接收的数据
+        usb_msg_buffer_size = 0;
+        usb_start_read_time = 0;
+    }
+
+    if (usb_start_read_time == 0)
+    {
+        usb_start_read_time = current_time;
+    }
+
     /* initialization */
     size_t rx_size = 0;
 
@@ -766,6 +784,7 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
             // 移除已处理的数据
             usb_msg_buffer_size -= whole_msg_len;
             memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
+            usb_start_read_time = 0;
             return;
         }
 
@@ -787,6 +806,7 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
                 // 移除已处理的数据
                 usb_msg_buffer_size -= whole_msg_len;
                 memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
+                usb_start_read_time = 0;
                 return;
             }
             memcpy(message.message, usb_msg_buffer + REQUEST_HEAD_LEN, data_len);
@@ -797,11 +817,13 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
 
         // 发送到队列
-        if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(100)) != pdPASS)
+        if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(5000)) != pdPASS)
         {
             ESP_LOGE(TAG, "Failed to send message to queue");
             free(message.message);
         }
+
+        usb_start_read_time = 0;
     }
     else
     {
