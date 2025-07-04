@@ -31,7 +31,7 @@
 #define MAX_MESSAGE_SIZE 1024    // 最大消息长度
 #define READ_TIMEOUT_MS 10000    // 读取超时时间（毫秒）
 #define TASK_STACK_SIZE 12288    // Task 栈大小
-#define QUEUE_SIZE 10            // 消息队列大小
+#define QUEUE_SIZE 20            // 消息队列大小
 #define ITF_MAX 255              // itf can't over this num
 
 static const char *TAG = "NESIGNER";
