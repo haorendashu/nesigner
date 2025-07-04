@@ -283,7 +283,7 @@ void handle_message_task(void *pvParameters)
             uint8_t iv[IV_SIZE];
             generate_random_iv(iv);
 
-            printf("message_type %d\n", msg.message_type);
+            // printf("message_type %d\n", msg.message_type);
 
             if (msg.message_type == MSG_TYPE_PING)
             {
