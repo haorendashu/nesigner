@@ -29,14 +29,28 @@ A hardware ESP32 Nostr Signer.
 
 ### Build Instructions
 
-1. Set up the ESP-IDF environment.
+1. Clone the repository and init git submodule:
 
-2. Config permission if necessary.
+```
+git clone https://github.com/yourusername/nesigner.git
+git submodule init;
+git submodule update;
+```
+
+2. Set up the ESP-IDF environment.
+
+3. Config permission if necessary.
 
 **Linux**, create ```/etc/udev/rules.d/99-nesigner.rules```:
 
 ```
-SUBSYSTEM=="usb", ATTR{idVendor}=="0x2323", ATTR{idProduct}=="0x3434", MODE="0666"
+SUBSYSTEM=="tty", ATTR{idVendor}=="0x2323", ATTR{idProduct}=="0x3434", MODE="0666"
+```
+
+or
+
+```
+SUBSYSTEM=="tty", MODE="0666"
 ```
 
 reload rule:
@@ -48,13 +62,13 @@ sudo udevadm control --reload-rules
 ~~**Windows**, use [Zadig Tool](https://zadig.akeo.ie/) to install WinUSB Driver.~~
 
 
-3. Configure the project:
+4. Configure the project:
 
 ```
 idf.py menuconfig
 ```
 
-4. Build, flash, and monitor the project:
+5. Build, flash, and monitor the project:
 
 ```
 idf.py build flash monitor
