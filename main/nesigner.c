@@ -761,6 +761,8 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         memcpy(header, usb_msg_buffer + offset, HEADER_SIZE);
         offset += HEADER_SIZE;
 
+        // printByteArrayAsDec((char *)header, HEADER_SIZE);
+
         // 解析数据长度
         uint32_t data_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
 
@@ -946,5 +948,6 @@ void app_main(void)
     // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
     ESP_LOGI(TAG, "nesigner started");
 
-    uart_data_receive();
+    // hide uart data receive function, because we use usb to receive data and sometimes this funcion will crash at macOS
+    // uart_data_receive();
 }
