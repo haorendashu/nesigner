@@ -32,7 +32,7 @@ A hardware ESP32 Nostr Signer.
 1. Clone the repository and init git submodule:
 
 ```
-git clone https://github.com/yourusername/nesigner.git
+git clone https://github.com/haorendashu/nesigner.git
 git submodule init;
 git submodule update;
 ```
