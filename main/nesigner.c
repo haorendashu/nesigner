@@ -30,8 +30,8 @@
 #define HEADER_SIZE 4            // 消息头长度（固定 4 字节）
 #define MAX_MESSAGE_SIZE 1024    // 最大消息长度
 #define READ_TIMEOUT_MS 10000    // 读取超时时间（毫秒）
-#define TASK_STACK_SIZE 12288    // Task 栈大小
-#define QUEUE_SIZE 20            // 消息队列大小
+#define TASK_STACK_SIZE 16384    // Task 栈大小（增加栈大小提高性能）
+#define QUEUE_SIZE 50            // 消息队列大小（增加队列容量）
 #define ITF_MAX 255              // itf can't over this num
 
 static const char *TAG = "NESIGNER";
@@ -90,8 +90,18 @@ typedef struct
     int message_len;
 } message_t;
 
+// 响应消息结构体
+typedef struct
+{
+    uint8_t itf;   // Index of CDC device interface
+    uint8_t *data; // Complete response data
+    int data_len;
+} response_t;
+
 // 消息队列句柄
 QueueHandle_t message_queue;
+// 响应队列句柄
+QueueHandle_t response_queue;
 
 bool is_timeout(uint64_t start_time, uint64_t timeout_ms)
 {
@@ -234,18 +244,22 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
     {
         // send by uart
         uart_send_data(whole_msg, whole_msg_len);
+        free(whole_msg);
     }
     else
     {
-        // send by usb
-        usb_send_data(itf, whole_msg, whole_msg_len);
-        esp_err_t err = tinyusb_cdcacm_write_flush(itf, 10000);
-        if (err != ESP_OK)
+        // 将响应发送到响应队列，由专门的任务处理
+        response_t response = {
+            .itf = itf,
+            .data = whole_msg,
+            .data_len = whole_msg_len};
+
+        if (xQueueSend(response_queue, &response, pdMS_TO_TICKS(100)) != pdPASS)
         {
-            ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "Failed to send response to queue");
+            free(whole_msg);
         }
     }
-    free(whole_msg);
 }
 
 void send_response_with_encrypt(uint8_t itf, uint8_t *aesKey, uint16_t message_result, uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
@@ -818,11 +832,12 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         usb_msg_buffer_size -= whole_msg_len;
         memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
 
-        // 发送到队列
-        if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(5000)) != pdPASS)
+        // 发送到队列，使用较短的超时时间，避免阻塞USB接收回调
+        if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(100)) != pdPASS)
         {
-            ESP_LOGE(TAG, "Failed to send message to queue");
+            ESP_LOGE(TAG, "Failed to send message to queue - queue full");
             free(message.message);
+            // 可以考虑在这里添加流量控制，如暂停接收或通知上层
         }
 
         usb_start_read_time = 0;
@@ -917,6 +932,30 @@ void usb_config()
     ESP_LOGI(TAG, "USB initialization DONE");
 }
 
+// 处理响应的 Task
+void handle_response_task(void *pvParameters)
+{
+    while (1)
+    {
+        response_t response;
+        if (xQueueReceive(response_queue, &response, portMAX_DELAY))
+        {
+            // 发送响应数据
+            usb_send_data(response.itf, response.data, response.data_len);
+
+            // 刷新USB缓冲区
+            esp_err_t err = tinyusb_cdcacm_write_flush(response.itf, 10000);
+            if (err != ESP_OK)
+            {
+                ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
+            }
+
+            // 释放响应数据内存
+            free(response.data);
+        }
+    }
+}
+
 void app_main(void)
 {
     // 关闭所有日志输出
@@ -938,12 +977,23 @@ void app_main(void)
         return;
     }
 
+    // 创建响应队列
+    response_queue = xQueueCreate(QUEUE_SIZE, sizeof(response_t));
+    if (response_queue == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create response queue");
+        return;
+    }
+
     uart_config();
 
     usb_config();
 
     // 创建处理消息的 Task
-    xTaskCreate(handle_message_task, "handle_message_task", TASK_STACK_SIZE, NULL, 5, NULL);
+    xTaskCreate(handle_message_task, "handle_message_task", TASK_STACK_SIZE, NULL, 10, NULL);
+
+    // 创建处理响应的 Task
+    xTaskCreate(handle_response_task, "handle_response_task", 8192, NULL, 8, NULL);
 
     // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
     ESP_LOGI(TAG, "nesigner started");
