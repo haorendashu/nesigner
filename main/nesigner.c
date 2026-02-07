@@ -17,6 +17,8 @@
 #include "tinyusb.h"
 #include "tusb_cdc_acm.h"
 #include "sdkconfig.h"
+#include "memory_pool.h"
+#include "error_handling.h"
 
 // #define UART_PORT_NUM UART_NUM_0 // 使用 UART0（USB-JTAG/Serial 控制器）
 #define UART_PORT_NUM UART_NUM_2 // 使用 UART0（USB-JTAG/Serial 控制器）
@@ -211,11 +213,15 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
 
     // 创建一个临时缓冲区来存储整个消息
     size_t whole_msg_len = TYPE_SIZE + ID_SIZE + RESULT_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE + message_len + CRC_SIZE;
-    uint8_t *whole_msg = malloc(whole_msg_len);
-    if (whole_msg == NULL)
+
+    // 使用内存池而不是直接malloc
+    MessageBuffer *buffer = memory_pool_get();
+    if (buffer == NULL)
     {
+        ESP_LOGE(TAG, "Failed to get buffer from memory pool");
         return;
     }
+    uint8_t *whole_msg = buffer->buffer;
     size_t offset = 0;
     memcpy(whole_msg + offset, type_bin, TYPE_SIZE);
     offset += TYPE_SIZE;
@@ -244,21 +250,33 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
     {
         // send by uart
         uart_send_data(whole_msg, whole_msg_len);
-        free(whole_msg);
+        memory_pool_release(buffer);
     }
     else
     {
+        // 分配USB响应专用缓冲区
+        uint8_t *usb_data = malloc(whole_msg_len);
+        if (usb_data == NULL)
+        {
+            ESP_LOGE(TAG, "Failed to allocate USB response buffer");
+            memory_pool_release(buffer);
+            return;
+        }
+        memcpy(usb_data, whole_msg, whole_msg_len);
+
         // 将响应发送到响应队列，由专门的任务处理
         response_t response = {
             .itf = itf,
-            .data = whole_msg,
+            .data = usb_data,
             .data_len = whole_msg_len};
 
         if (xQueueSend(response_queue, &response, pdMS_TO_TICKS(100)) != pdPASS)
         {
             ESP_LOGE(TAG, "Failed to send response to queue");
-            free(whole_msg);
+            CLEANUP_POINTER(usb_data);
         }
+
+        memory_pool_release(buffer);
     }
 }
 
@@ -961,9 +979,17 @@ void app_main(void)
     // 关闭所有日志输出
     // esp_log_level_set("*", ESP_LOG_NONE);
 
+    // 初始化内存缓冲池
+    if (!memory_pool_init())
+    {
+        ESP_LOGE(TAG, "Failed to initialize memory pool");
+        return;
+    }
+
     if (gen_private_key(temp_private_key) == -1)
     {
         ESP_LOGI("Test", "gen temp private key fail");
+        memory_pool_destroy();
         return;
     }
 
@@ -974,6 +1000,7 @@ void app_main(void)
     if (message_queue == NULL)
     {
         ESP_LOGE(TAG, "Failed to create message queue");
+        memory_pool_destroy();
         return;
     }
 
@@ -982,6 +1009,7 @@ void app_main(void)
     if (response_queue == NULL)
     {
         ESP_LOGE(TAG, "Failed to create response queue");
+        memory_pool_destroy();
         return;
     }
 
@@ -996,7 +1024,7 @@ void app_main(void)
     xTaskCreate(handle_response_task, "handle_response_task", 8192, NULL, 8, NULL);
 
     // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
-    ESP_LOGI(TAG, "nesigner started");
+    ESP_LOGI(TAG, "nesigner started with memory pool optimization");
 
     // hide uart data receive function, because we use usb to receive data and sometimes this funcion will crash at macOS
     // uart_data_receive();

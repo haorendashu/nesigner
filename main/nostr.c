@@ -14,6 +14,7 @@
 #include "mbedtls/base64.h"
 #include "cJSON.h"
 #include "utils.h"
+#include "error_handling.h"
 
 // 将16进制字符串转换为二进制
 int hex_to_bin(const char *hex, uint8_t *bin, size_t bin_size)
@@ -162,10 +163,10 @@ int get_public(const uint8_t *privkey_bin, uint8_t *pubkey_bin)
     mbedtls_ecp_point pub;
     mbedtls_mpi d;
     uint8_t temp_pubkey[33]; // 压缩公钥需要33字节
+    int ret = -1;
 
     // 获取全局加密上下文
-    if (get_crypto_context(&grp, &ctr_drbg) != 0)
-        return -1;
+    CHECK_RETURN_SILENT(get_crypto_context(&grp, &ctr_drbg) == 0, -1);
 
     mbedtls_ecp_point_init(&pub);
     mbedtls_mpi_init(&d);
@@ -174,42 +175,41 @@ int get_public(const uint8_t *privkey_bin, uint8_t *pubkey_bin)
     mbedtls_mpi_read_binary(&d, privkey_bin, 32);
 
     // 计算公钥 Q = d * G
-    if (mbedtls_ecp_mul(grp, &pub, &d, &grp->G, mbedtls_ctr_drbg_random, ctr_drbg) != 0)
-    {
-        ESP_LOGE("Nostr", "ECP multiply failed");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_mul(grp, &pub, &d, &grp->G, mbedtls_ctr_drbg_random, ctr_drbg) == 0,
+                 -1, "Nostr", "ECP multiply failed");
 
     // 获取压缩格式的公钥（33字节）
     size_t olen;
-    if (mbedtls_ecp_point_write_binary(grp, &pub, MBEDTLS_ECP_PF_COMPRESSED,
-                                       &olen, temp_pubkey, sizeof(temp_pubkey)) != 0)
-    {
-        ESP_LOGE("Nostr", "Failed to write public key");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_point_write_binary(grp, &pub, MBEDTLS_ECP_PF_COMPRESSED,
+                                                &olen, temp_pubkey, sizeof(temp_pubkey)) == 0,
+                 -1, "Nostr", "Failed to write public key");
 
     // 提取 x 坐标（跳过压缩标志字节）
-    if (olen != 33 || (temp_pubkey[0] != 0x02 && temp_pubkey[0] != 0x03))
-    {
-        ESP_LOGE("Nostr", "Unexpected public key format");
-        goto cleanup;
-    }
+    CHECK_RETURN(olen == 33 && (temp_pubkey[0] == 0x02 || temp_pubkey[0] == 0x03),
+                 -1, "Nostr", "Unexpected public key format");
+
     memcpy(pubkey_bin, temp_pubkey + 1, 32);
+    ret = 0;
 
 cleanup:
     mbedtls_ecp_point_free(&pub);
     mbedtls_mpi_free(&d);
     // 不再释放全局上下文
-    return 0;
+    return ret;
 }
 
 // 计算 Nostr Event ID
 int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
                  cJSON *tags, const char *content, char *event_id_hex)
 {
+    int ret = -1;
+    cJSON *event_array = NULL;
+    char *json_str = NULL;
+
     // 1. 构建事件数组
-    cJSON *event_array = cJSON_CreateArray();
+    event_array = cJSON_CreateArray();
+    CHECK_RETURN(event_array != NULL, -1, "Nostr", "Failed to create event array");
+
     cJSON_AddItemToArray(event_array, cJSON_CreateNumber(0));          // 固定值 0
     cJSON_AddItemToArray(event_array, cJSON_CreateString(pubkey_hex)); // pubkey
     cJSON_AddItemToArray(event_array, cJSON_CreateNumber(created_at)); // created_at
@@ -218,13 +218,8 @@ int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
     cJSON_AddItemToArray(event_array, cJSON_CreateString(content));    // content
 
     // 2. 序列化为 JSON 字符串
-    char *json_str = cJSON_PrintUnformatted(event_array);
-    if (!json_str)
-    {
-        ESP_LOGE("Nostr", "Failed to serialize event data to JSON");
-        cJSON_Delete(event_array);
-        return -1;
-    }
+    json_str = cJSON_PrintUnformatted(event_array);
+    CHECK_RETURN(json_str != NULL, -1, "Nostr", "Failed to serialize event data to JSON");
 
     // 3. 计算 SHA256 哈希
     uint8_t hash[32];
@@ -237,12 +232,17 @@ int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
 
     // 4. 转换为小写十六进制字符串
     bin_to_hex(hash, sizeof(hash), event_id_hex);
+    ret = 0;
 
+cleanup:
     // 清理资源
-    cJSON_Delete(event_array);
-    free(json_str);
+    if (event_array != NULL)
+    {
+        cJSON_Delete(event_array);
+    }
+    CLEANUP_POINTER(json_str);
 
-    return 0;
+    return ret;
 }
 
 // Tagged Hash 实现
@@ -419,10 +419,7 @@ static int compute_shared_secret(const uint8_t *our_privkey_bin, const uint8_t *
     uint8_t temp_pubkey_bin[33];
     int ret = -1;
 
-    if (get_crypto_context(&grp, &ctr_drbg) != 0)
-    {
-        return -1;
-    }
+    CHECK_RETURN_SILENT(get_crypto_context(&grp, &ctr_drbg) == 0, -1);
 
     mbedtls_ecp_point_init(&their_pub);
     mbedtls_ecp_point_init(&shared_point);
@@ -437,41 +434,39 @@ static int compute_shared_secret(const uint8_t *our_privkey_bin, const uint8_t *
         ESP_LOGE("NIP44", "公钥解析失败");
         goto cleanup;
     }
+    mbedtls_ecp_point_init(&their_pub);
+    mbedtls_ecp_point_init(&shared_point);
+    mbedtls_mpi_init(&our_priv);
+
+    memcpy(temp_pubkey_bin + 1, their_pubkey_bin, 32);
+    temp_pubkey_bin[0] = 0x02; // 强制使用压缩格式
+
+    // 解析公钥点
+    CHECK_RETURN(mbedtls_ecp_point_read_binary(grp, &their_pub, temp_pubkey_bin, 33) == 0,
+                 -1, "NIP44", "公钥解析失败");
 
     // 验证公钥有效性
-    if (mbedtls_ecp_check_pubkey(grp, &their_pub) != 0)
-    {
-        ESP_LOGE("NIP44", "无效的公钥点");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_check_pubkey(grp, &their_pub) == 0,
+                 -1, "NIP44", "无效的公钥点");
 
     uint8_t our_privkey_bin_copy[32];
     memcpy(our_privkey_bin_copy, our_privkey_bin, 32); // 拷贝，避免被修改
     mbedtls_mpi_read_binary(&our_priv, our_privkey_bin_copy, 32);
 
     // 计算共享点
-    if (mbedtls_ecp_mul(grp, &shared_point, &our_priv, &their_pub, mbedtls_ctr_drbg_random, ctr_drbg) != 0)
-    {
-        ESP_LOGE("NIP44", "椭圆曲线乘法失败");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_mul(grp, &shared_point, &our_priv, &their_pub, mbedtls_ctr_drbg_random, ctr_drbg) == 0,
+                 -1, "NIP44", "椭圆曲线乘法失败");
 
     // 验证共享点有效性
-    if (mbedtls_ecp_check_pubkey(grp, &shared_point) != 0)
-    {
-        ESP_LOGE("NIP44", "无效的共享点");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_check_pubkey(grp, &shared_point) == 0,
+                 -1, "NIP44", "无效的共享点");
 
     // 提取X坐标
     size_t olen;
     uint8_t shared_point_bin[33];
-    if (mbedtls_ecp_point_write_binary(grp, &shared_point, MBEDTLS_ECP_PF_COMPRESSED,
-                                       &olen, shared_point_bin, sizeof(shared_point_bin)) != 0)
-    {
-        ESP_LOGE("NIP44", "共享点序列化失败");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_point_write_binary(grp, &shared_point, MBEDTLS_ECP_PF_COMPRESSED,
+                                                &olen, shared_point_bin, sizeof(shared_point_bin)) == 0,
+                 -1, "NIP44", "共享点序列化失败");
 
     // 调试输出
     // char debug_buf[65] = {0};
