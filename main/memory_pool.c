@@ -102,7 +102,11 @@ void memory_pool_release(MessageBuffer *buf)
         if (&buffer_pool[i] == buf)
         {
             buffer_pool[i].in_use = false;
-            memset(buffer_pool[i].buffer, 0, MAX_BUFFER_SIZE);
+            size_t clear_size = (buf->used_size > 0 && buf->used_size <= MAX_BUFFER_SIZE)
+                                    ? buf->used_size
+                                    : MAX_BUFFER_SIZE;
+            memset(buffer_pool[i].buffer, 0, clear_size);
+            buffer_pool[i].used_size = 0;
             ESP_LOGD(TAG, "Released buffer %d", i);
             break;
         }

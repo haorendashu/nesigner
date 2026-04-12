@@ -98,6 +98,7 @@ typedef struct
     uint8_t itf;   // Index of CDC device interface
     uint8_t *data; // Complete response data
     int data_len;
+    MessageBuffer *pool_buffer; // 非NULL=池缓冲区，由接收方调用memory_pool_release；NULL=堆内存，由接收方调用free
 } response_t;
 
 // 消息队列句柄
@@ -181,8 +182,8 @@ void usb_send_data(uint8_t itf, uint8_t *message, int message_len)
                 ESP_LOGE(TAG, "USB send timeout");
                 break;
             }
-            // 缓冲区已满，可以延时等待或处理其他任务
-            vTaskDelay(pdMS_TO_TICKS(1)); // 适当延时避免忙等待
+            // 主动刷新USB传输，腾出发送缓冲区空间（替代盲等待）
+            tinyusb_cdcacm_write_flush(itf, pdMS_TO_TICKS(10));
             continue;
         }
 
@@ -192,6 +193,13 @@ void usb_send_data(uint8_t itf, uint8_t *message, int message_len)
 
         // printf("Partial send: %d, Total sent: %d, Remaining: %d\n",
         //        send_length, total_sent, remaining);
+    }
+
+    // 发送完毕后最终刷新，确保数据全部传出
+    esp_err_t flush_err = tinyusb_cdcacm_write_flush(itf, 10000);
+    if (flush_err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(flush_err));
     }
 }
 
@@ -249,34 +257,25 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
     if (itf >= ITF_MAX)
     {
         // send by uart
+        buffer->used_size = whole_msg_len;
         uart_send_data(whole_msg, whole_msg_len);
         memory_pool_release(buffer);
     }
     else
     {
-        // 分配USB响应专用缓冲区
-        uint8_t *usb_data = malloc(whole_msg_len);
-        if (usb_data == NULL)
-        {
-            ESP_LOGE(TAG, "Failed to allocate USB response buffer");
-            memory_pool_release(buffer);
-            return;
-        }
-        memcpy(usb_data, whole_msg, whole_msg_len);
-
-        // 将响应发送到响应队列，由专门的任务处理
+        buffer->used_size = whole_msg_len;
+        // 将响应发入响应队列（零拷贝：直接转移池缓冲区所有权，由handle_response_task释放）
         response_t response = {
             .itf = itf,
-            .data = usb_data,
-            .data_len = whole_msg_len};
+            .data = whole_msg,
+            .data_len = whole_msg_len,
+            .pool_buffer = buffer};
 
         if (xQueueSend(response_queue, &response, pdMS_TO_TICKS(100)) != pdPASS)
         {
             ESP_LOGE(TAG, "Failed to send response to queue");
-            CLEANUP_POINTER(usb_data);
+            memory_pool_release(buffer);
         }
-
-        memory_pool_release(buffer);
     }
 }
 
@@ -958,18 +957,14 @@ void handle_response_task(void *pvParameters)
         response_t response;
         if (xQueueReceive(response_queue, &response, portMAX_DELAY))
         {
-            // 发送响应数据
+            // 发送响应数据（内部已包含最终flush）
             usb_send_data(response.itf, response.data, response.data_len);
 
-            // 刷新USB缓冲区
-            esp_err_t err = tinyusb_cdcacm_write_flush(response.itf, 10000);
-            if (err != ESP_OK)
-            {
-                ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
-            }
-
-            // 释放响应数据内存
-            free(response.data);
+            // 释放响应数据内存（零拷贝路径归还内存池；堆分配路径直接free）
+            if (response.pool_buffer != NULL)
+                memory_pool_release(response.pool_buffer);
+            else
+                free(response.data);
         }
     }
 }

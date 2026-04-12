@@ -22,6 +22,7 @@ typedef struct
 {
     uint8_t buffer[MAX_BUFFER_SIZE];
     bool in_use;
+    size_t used_size; // 实际写入字节数，0=未知（清零全部）
 } MessageBuffer;
 
 /**

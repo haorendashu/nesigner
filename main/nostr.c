@@ -970,16 +970,39 @@ int hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t 
     return 0;
 }
 
+// HMAC-SHA256 计算（两段数据，无需拼接缓冲区）
+static int hmac_sha256_2parts(const uint8_t *key, size_t key_len,
+                              const uint8_t *data1, size_t len1,
+                              const uint8_t *data2, size_t len2,
+                              uint8_t *output)
+{
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    if (mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1) != 0)
+    {
+        mbedtls_md_free(&ctx);
+        return -1;
+    }
+    if (mbedtls_md_hmac_starts(&ctx, key, key_len) != 0 ||
+        mbedtls_md_hmac_update(&ctx, data1, len1) != 0 ||
+        mbedtls_md_hmac_update(&ctx, data2, len2) != 0 ||
+        mbedtls_md_hmac_finish(&ctx, output) != 0)
+    {
+        mbedtls_md_free(&ctx);
+        return -1;
+    }
+    mbedtls_md_free(&ctx);
+    return 0;
+}
+
 // NIP44加密函数
 int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
                   const char *text, char **encrypted_content)
 {
 
     uint8_t shared_x[32];
-    uint8_t *cipher = NULL;
     uint8_t *payload = NULL;
     uint8_t *padded_text = NULL;
-    uint8_t *mac_input = NULL;
     mbedtls_chacha20_context ctx;
     int ret = -1;
 
@@ -1020,37 +1043,7 @@ int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
         goto cleanup;
     }
 
-    // 5. ChaCha20 encryption
-    if ((cipher = malloc(padded_len)) == NULL)
-    {
-        ESP_LOGE("NIP44", "Memory allocation failed");
-        goto cleanup;
-    }
-    if (mbedtls_chacha20_setkey(&ctx, chacha_key) != 0 ||
-        mbedtls_chacha20_starts(&ctx, chacha_nonce, 0) != 0 ||
-        mbedtls_chacha20_update(&ctx, padded_len, padded_text, cipher) != 0)
-    {
-        ESP_LOGE("NIP44", "Encryption failed");
-        goto cleanup;
-    }
-
-    // 6. Compute HMAC-SHA256 (nonce || cipher)
-    if ((mac_input = malloc(32 + padded_len)) == NULL)
-    {
-        ESP_LOGE("NIP44", "Memory allocation failed");
-        goto cleanup;
-    }
-    memcpy(mac_input, nonce, 32);
-    memcpy(mac_input + 32, cipher, padded_len);
-
-    uint8_t mac[32];
-    if (hmac_sha256(hmac_key, 32, mac_input, 32 + padded_len, mac) != 0)
-    {
-        ESP_LOGE("NIP44", "HMAC calculation failed");
-        goto cleanup;
-    }
-
-    // 7. Build payload: version(1) + nonce(32) + cipher + mac(32)
+    // 5. 预分配 payload 并直接加密入内（消除独立的 cipher 缓冲区）
     const size_t payload_size = 1 + 32 + padded_len + 32;
     if ((payload = malloc(payload_size)) == NULL)
     {
@@ -1059,7 +1052,27 @@ int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
     }
     payload[0] = 0x02; // version
     memcpy(payload + 1, nonce, 32);
-    memcpy(payload + 33, cipher, padded_len);
+
+    // 直接将 padded_text 加密写入 payload+33，无需中间 cipher 缓冲区
+    if (mbedtls_chacha20_setkey(&ctx, chacha_key) != 0 ||
+        mbedtls_chacha20_starts(&ctx, chacha_nonce, 0) != 0 ||
+        mbedtls_chacha20_update(&ctx, padded_len, padded_text, payload + 33) != 0)
+    {
+        ESP_LOGE("NIP44", "Encryption failed");
+        goto cleanup;
+    }
+    free(padded_text);
+    padded_text = NULL;
+
+    // 6. 计算 HMAC-SHA256(nonce || cipher)，无需拼接缓冲区
+    uint8_t mac[32];
+    if (hmac_sha256_2parts(hmac_key, 32, payload + 1, 32, payload + 33, padded_len, mac) != 0)
+    {
+        ESP_LOGE("NIP44", "HMAC calculation failed");
+        goto cleanup;
+    }
+
+    // 7. 把 MAC 追加到 payload 末尾
     memcpy(payload + 33 + padded_len, mac, 32);
 
     // 8. Base64 encode
@@ -1075,12 +1088,8 @@ cleanup:
     mbedtls_chacha20_free(&ctx);
     if (padded_text)
         free(padded_text);
-    if (cipher)
-        free(cipher);
     if (payload)
         free(payload);
-    if (mac_input)
-        free(mac_input);
     return ret;
 }
 
@@ -1089,7 +1098,6 @@ int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
                   const char *encrypted_content, char **decrypted_text)
 {
     uint8_t *payload = NULL;
-    uint8_t *mac_input = NULL;
     mbedtls_chacha20_context ctx;
     int ret = -1;
     size_t payload_len;
@@ -1107,7 +1115,7 @@ int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
 
     // 2. Parse components
     const uint8_t *nonce = payload + 1;
-    const uint8_t *cipher = payload + 33;
+    uint8_t *cipher = payload + 33;
     const size_t cipher_len = payload_len - 33 - 32;
     const uint8_t *mac = payload + 33 + cipher_len;
 
@@ -1127,17 +1135,9 @@ int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
         goto cleanup;
     }
 
-    // 5. Verify HMAC
-    if ((mac_input = malloc(32 + cipher_len)) == NULL)
-    {
-        ESP_LOGE("NIP44", "Memory allocation failed");
-        goto cleanup;
-    }
-    memcpy(mac_input, nonce, 32);
-    memcpy(mac_input + 32, cipher, cipher_len);
-
+    // 5. Verify HMAC（无需拼接缓冲区）
     uint8_t computed_mac[32];
-    if (hmac_sha256(hmac_key, 32, mac_input, 32 + cipher_len, computed_mac) != 0)
+    if (hmac_sha256_2parts(hmac_key, 32, nonce, 32, cipher, cipher_len, computed_mac) != 0)
     {
         ESP_LOGE("NIP44", "HMAC calculation failed");
         goto cleanup;
@@ -1148,22 +1148,17 @@ int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
         goto cleanup;
     }
 
-    // 6. Decrypt
-    uint8_t *decrypted = malloc(cipher_len);
+    // 6. 原地解密（ChaCha20 流密码支持 input==output 原地操作）
     if (mbedtls_chacha20_setkey(&ctx, chacha_key) != 0 ||
         mbedtls_chacha20_starts(&ctx, chacha_nonce, 0) != 0 ||
-        mbedtls_chacha20_update(&ctx, cipher_len, cipher, decrypted) != 0)
+        mbedtls_chacha20_update(&ctx, cipher_len, cipher, cipher) != 0)
     {
         ESP_LOGE("NIP44", "Decryption failed");
-        if (decrypted)
-            free(decrypted);
         goto cleanup;
     }
 
-    // 7. Unpad
-    char *unpadded = nip44_unpad(decrypted, cipher_len);
-    if (decrypted)
-        free(decrypted);
+    // 7. 直接在 payload 缓冲区中去填充，无需额外 alloc
+    char *unpadded = nip44_unpad(cipher, cipher_len);
     if (!unpadded)
     {
         ESP_LOGE("NIP44", "Unpadding failed");
@@ -1177,7 +1172,5 @@ cleanup:
     mbedtls_chacha20_free(&ctx);
     if (payload)
         free(payload);
-    if (mac_input)
-        free(mac_input);
     return ret;
 }
