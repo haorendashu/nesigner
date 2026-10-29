@@ -17,6 +17,8 @@
 #include "tinyusb.h"
 #include "tusb_cdc_acm.h"
 #include "sdkconfig.h"
+#include "memory_pool.h"
+#include "error_handling.h"
 
 // #define UART_PORT_NUM UART_NUM_0 // 使用 UART0（USB-JTAG/Serial 控制器）
 #define UART_PORT_NUM UART_NUM_2 // 使用 UART0（USB-JTAG/Serial 控制器）
@@ -30,8 +32,8 @@
 #define HEADER_SIZE 4            // 消息头长度（固定 4 字节）
 #define MAX_MESSAGE_SIZE 1024    // 最大消息长度
 #define READ_TIMEOUT_MS 10000    // 读取超时时间（毫秒）
-#define TASK_STACK_SIZE 12288    // Task 栈大小
-#define QUEUE_SIZE 20            // 消息队列大小
+#define TASK_STACK_SIZE 16384    // Task 栈大小（增加栈大小提高性能）
+#define QUEUE_SIZE 50            // 消息队列大小（增加队列容量）
 #define ITF_MAX 255              // itf can't over this num
 
 static const char *TAG = "NESIGNER";
@@ -90,8 +92,19 @@ typedef struct
     int message_len;
 } message_t;
 
+// 响应消息结构体
+typedef struct
+{
+    uint8_t itf;   // Index of CDC device interface
+    uint8_t *data; // Complete response data
+    int data_len;
+    MessageBuffer *pool_buffer; // 非NULL=池缓冲区，由接收方调用memory_pool_release；NULL=堆内存，由接收方调用free
+} response_t;
+
 // 消息队列句柄
 QueueHandle_t message_queue;
+// 响应队列句柄
+QueueHandle_t response_queue;
 
 bool is_timeout(uint64_t start_time, uint64_t timeout_ms)
 {
@@ -169,8 +182,8 @@ void usb_send_data(uint8_t itf, uint8_t *message, int message_len)
                 ESP_LOGE(TAG, "USB send timeout");
                 break;
             }
-            // 缓冲区已满，可以延时等待或处理其他任务
-            vTaskDelay(pdMS_TO_TICKS(1)); // 适当延时避免忙等待
+            // 主动刷新USB传输，腾出发送缓冲区空间（替代盲等待）
+            tinyusb_cdcacm_write_flush(itf, pdMS_TO_TICKS(10));
             continue;
         }
 
@@ -180,6 +193,13 @@ void usb_send_data(uint8_t itf, uint8_t *message, int message_len)
 
         // printf("Partial send: %d, Total sent: %d, Remaining: %d\n",
         //        send_length, total_sent, remaining);
+    }
+
+    // 发送完毕后最终刷新，确保数据全部传出
+    esp_err_t flush_err = tinyusb_cdcacm_write_flush(itf, 10000);
+    if (flush_err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(flush_err));
     }
 }
 
@@ -201,11 +221,15 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
 
     // 创建一个临时缓冲区来存储整个消息
     size_t whole_msg_len = TYPE_SIZE + ID_SIZE + RESULT_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE + message_len + CRC_SIZE;
-    uint8_t *whole_msg = malloc(whole_msg_len);
-    if (whole_msg == NULL)
+
+    // 使用内存池而不是直接malloc
+    MessageBuffer *buffer = memory_pool_get();
+    if (buffer == NULL)
     {
+        ESP_LOGE(TAG, "Failed to get buffer from memory pool");
         return;
     }
+    uint8_t *whole_msg = buffer->buffer;
     size_t offset = 0;
     memcpy(whole_msg + offset, type_bin, TYPE_SIZE);
     offset += TYPE_SIZE;
@@ -233,19 +257,26 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
     if (itf >= ITF_MAX)
     {
         // send by uart
+        buffer->used_size = whole_msg_len;
         uart_send_data(whole_msg, whole_msg_len);
+        memory_pool_release(buffer);
     }
     else
     {
-        // send by usb
-        usb_send_data(itf, whole_msg, whole_msg_len);
-        esp_err_t err = tinyusb_cdcacm_write_flush(itf, 10000);
-        if (err != ESP_OK)
+        buffer->used_size = whole_msg_len;
+        // 将响应发入响应队列（零拷贝：直接转移池缓冲区所有权，由handle_response_task释放）
+        response_t response = {
+            .itf = itf,
+            .data = whole_msg,
+            .data_len = whole_msg_len,
+            .pool_buffer = buffer};
+
+        if (xQueueSend(response_queue, &response, pdMS_TO_TICKS(100)) != pdPASS)
         {
-            ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "Failed to send response to queue");
+            memory_pool_release(buffer);
         }
     }
-    free(whole_msg);
 }
 
 void send_response_with_encrypt(uint8_t itf, uint8_t *aesKey, uint16_t message_result, uint16_t message_type, const uint8_t *message_id, const uint8_t *pubkey, const uint8_t *iv,
@@ -818,11 +849,12 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
         usb_msg_buffer_size -= whole_msg_len;
         memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
 
-        // 发送到队列
-        if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(5000)) != pdPASS)
+        // 发送到队列，使用较短的超时时间，避免阻塞USB接收回调
+        if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(100)) != pdPASS)
         {
-            ESP_LOGE(TAG, "Failed to send message to queue");
+            ESP_LOGE(TAG, "Failed to send message to queue - queue full");
             free(message.message);
+            // 可以考虑在这里添加流量控制，如暂停接收或通知上层
         }
 
         usb_start_read_time = 0;
@@ -917,14 +949,42 @@ void usb_config()
     ESP_LOGI(TAG, "USB initialization DONE");
 }
 
+// 处理响应的 Task
+void handle_response_task(void *pvParameters)
+{
+    while (1)
+    {
+        response_t response;
+        if (xQueueReceive(response_queue, &response, portMAX_DELAY))
+        {
+            // 发送响应数据（内部已包含最终flush）
+            usb_send_data(response.itf, response.data, response.data_len);
+
+            // 释放响应数据内存（零拷贝路径归还内存池；堆分配路径直接free）
+            if (response.pool_buffer != NULL)
+                memory_pool_release(response.pool_buffer);
+            else
+                free(response.data);
+        }
+    }
+}
+
 void app_main(void)
 {
     // 关闭所有日志输出
     // esp_log_level_set("*", ESP_LOG_NONE);
 
+    // 初始化内存缓冲池
+    if (!memory_pool_init())
+    {
+        ESP_LOGE(TAG, "Failed to initialize memory pool");
+        return;
+    }
+
     if (gen_private_key(temp_private_key) == -1)
     {
         ESP_LOGI("Test", "gen temp private key fail");
+        memory_pool_destroy();
         return;
     }
 
@@ -935,6 +995,16 @@ void app_main(void)
     if (message_queue == NULL)
     {
         ESP_LOGE(TAG, "Failed to create message queue");
+        memory_pool_destroy();
+        return;
+    }
+
+    // 创建响应队列
+    response_queue = xQueueCreate(QUEUE_SIZE, sizeof(response_t));
+    if (response_queue == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create response queue");
+        memory_pool_destroy();
         return;
     }
 
@@ -943,10 +1013,13 @@ void app_main(void)
     usb_config();
 
     // 创建处理消息的 Task
-    xTaskCreate(handle_message_task, "handle_message_task", TASK_STACK_SIZE, NULL, 5, NULL);
+    xTaskCreate(handle_message_task, "handle_message_task", TASK_STACK_SIZE, NULL, 10, NULL);
+
+    // 创建处理响应的 Task
+    xTaskCreate(handle_response_task, "handle_response_task", 8192, NULL, 8, NULL);
 
     // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
-    ESP_LOGI(TAG, "nesigner started");
+    ESP_LOGI(TAG, "nesigner started with memory pool optimization");
 
     // hide uart data receive function, because we use usb to receive data and sometimes this funcion will crash at macOS
     // uart_data_receive();

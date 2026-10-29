@@ -176,12 +176,9 @@ bool addAndSaveKeyPair(const KeyPair *pair)
         }
     }
 
-    // 不存在则新增：先验证公私钥再分配内存
-    KeyPair new_entry;
-    memcpy(&new_entry, pair, sizeof(KeyPair));
-
-    // 预生成公钥
-    if (get_public(new_entry.privateKey, new_entry.pubkey) != 0)
+    // 预先生成公钥，避免分配内存后再发现错误
+    uint8_t new_pubkey[PUBKEY_LEN];
+    if (get_public(pair->privateKey, new_pubkey) != 0)
     {
         return false;
     }
@@ -193,9 +190,14 @@ bool addAndSaveKeyPair(const KeyPair *pair)
         return false;
     }
 
-    // 复制数据到新数组
+    // 直接使用新内存地址，减少一次memcpy
+    KeyPair *new_entry = &new_pairs[keypair_count];
+    memcpy(new_entry->aesKey, pair->aesKey, AES_KEY_LEN);
+    memcpy(new_entry->privateKey, pair->privateKey, PRIVATE_KEY_LEN);
+    memcpy(new_entry->pubkey, new_pubkey, PUBKEY_LEN);
+
+    // 更新全局变量
     keypairs = new_pairs;
-    memcpy(&keypairs[keypair_count], &new_entry, sizeof(KeyPair));
     keypair_count++;
 
     // 持久化存储
@@ -235,19 +237,28 @@ bool removeAndSaveKeyPair(const uint8_t *aesKey)
     // 创建新数组（避免直接修改原数组）
     size_t new_count = keypair_count - 1;
     KeyPair *new_keypairs = NULL;
-    if (new_count > 0)
+    bool need_new_array = (new_count > 0);
+
+    if (need_new_array)
     {
         new_keypairs = malloc(new_count * sizeof(KeyPair));
         if (!new_keypairs)
             return false;
 
-        // 复制除目标外的元素
-        memcpy(new_keypairs, keypairs, target_idx * sizeof(KeyPair));
-        if (target_idx < new_count)
+        // 优化复制方式：如果是最后一个元素，直接不复制它
+        if (target_idx == new_count)
         {
-            memcpy(new_keypairs + target_idx,
-                   keypairs + target_idx + 1,
-                   (new_count - target_idx) * sizeof(KeyPair));
+            // 要删除的是最后一个元素，只复制前面的元素
+            memcpy(new_keypairs, keypairs, new_count * sizeof(KeyPair));
+        }
+        else
+        {
+            // 要删除的是中间元素，复制两部分
+            size_t first_part_len = target_idx * sizeof(KeyPair);
+            size_t second_part_len = (new_count - target_idx) * sizeof(KeyPair);
+
+            memcpy(new_keypairs, keypairs, first_part_len);
+            memcpy(new_keypairs + target_idx, keypairs + target_idx + 1, second_part_len);
         }
     }
 
@@ -263,7 +274,8 @@ bool removeAndSaveKeyPair(const uint8_t *aesKey)
     if (!save_to_nvs())
     {
         // 保存失败，回滚旧数据
-        free(new_keypairs);
+        if (need_new_array)
+            free(new_keypairs);
         keypairs = old_keypairs;
         keypair_count = old_count;
         return false;

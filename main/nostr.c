@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mbedtls/ecp.h"
 #include "mbedtls/bignum.h"
 #include "mbedtls/ctr_drbg.h"
@@ -12,6 +14,7 @@
 #include "mbedtls/base64.h"
 #include "cJSON.h"
 #include "utils.h"
+#include "error_handling.h"
 
 // 将16进制字符串转换为二进制
 int hex_to_bin(const char *hex, uint8_t *bin, size_t bin_size)
@@ -35,48 +38,84 @@ void bin_to_hex(const uint8_t *bin, size_t bin_size, char *hex)
     }
 }
 
-// 初始化随机数生成器和加载 secp256k1 曲线
-static int init_crypto_context(mbedtls_ecp_group *grp, mbedtls_ctr_drbg_context *ctr_drbg)
+// 全局密码学上下文，避免重复初始化
+static mbedtls_ecp_group grp_global;
+static mbedtls_ctr_drbg_context ctr_drbg_global;
+static bool crypto_context_initialized = false;
+// 互斥锁保护全局密码上下文
+static portMUX_TYPE crypto_context_mutex = portMUX_INITIALIZER_UNLOCKED;
+
+// 初始化随机数生成器和加载 secp256k1 曲线（全局上下文）
+static int init_crypto_context_global(void)
 {
+    if (crypto_context_initialized)
+    {
+        return 0; // 已经初始化，直接返回
+    }
+
     mbedtls_entropy_context entropy;
     mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(ctr_drbg);
+    mbedtls_ctr_drbg_init(&ctr_drbg_global);
 
     // 用熵源初始化 CTR_DRBG
-    if (mbedtls_ctr_drbg_seed(ctr_drbg, mbedtls_entropy_func, &entropy, NULL, 0) != 0)
+    if (mbedtls_ctr_drbg_seed(&ctr_drbg_global, mbedtls_entropy_func, &entropy, NULL, 0) != 0)
     {
         ESP_LOGE("Nostr", "Failed to seed CTR_DRBG");
-        mbedtls_ctr_drbg_free(ctr_drbg);
+        mbedtls_ctr_drbg_free(&ctr_drbg_global);
         mbedtls_entropy_free(&entropy);
         return -1;
     }
 
     // 加载 secp256k1 曲线
-    mbedtls_ecp_group_init(grp);
-    if (mbedtls_ecp_group_load(grp, MBEDTLS_ECP_DP_SECP256K1) != 0)
+    mbedtls_ecp_group_init(&grp_global);
+    if (mbedtls_ecp_group_load(&grp_global, MBEDTLS_ECP_DP_SECP256K1) != 0)
     {
         ESP_LOGE("Nostr", "Failed to load secp256k1 curve");
-        mbedtls_ctr_drbg_free(ctr_drbg);
+        mbedtls_ctr_drbg_free(&ctr_drbg_global);
         mbedtls_entropy_free(&entropy);
-        mbedtls_ecp_group_free(grp);
+        mbedtls_ecp_group_free(&grp_global);
         return -1;
     }
 
     mbedtls_entropy_free(&entropy);
+    crypto_context_initialized = true;
+    return 0;
+}
+
+// 获取全局密码学上下文
+static int get_crypto_context(mbedtls_ecp_group **grp, mbedtls_ctr_drbg_context **ctr_drbg)
+{
+    // 进入临界区
+    portENTER_CRITICAL(&crypto_context_mutex);
+
+    if (!crypto_context_initialized)
+    {
+        if (init_crypto_context_global() != 0)
+        {
+            portEXIT_CRITICAL(&crypto_context_mutex);
+            return -1;
+        }
+    }
+
+    *grp = &grp_global;
+    *ctr_drbg = &ctr_drbg_global;
+
+    // 退出临界区
+    portEXIT_CRITICAL(&crypto_context_mutex);
     return 0;
 }
 
 int gen_private_key(uint8_t private_key_bin[32])
 {
-    mbedtls_ecp_group grp;
-    mbedtls_ctr_drbg_context ctr_drbg;
+    mbedtls_ecp_group *grp;
+    mbedtls_ctr_drbg_context *ctr_drbg;
     mbedtls_mpi d;
     int ret = -1;
 
-    // 初始化加密上下文
-    if (init_crypto_context(&grp, &ctr_drbg) != 0)
+    // 获取全局加密上下文
+    if (get_crypto_context(&grp, &ctr_drbg) != 0)
     {
-        ESP_LOGE("Nostr", "Failed to initialize crypto context");
+        ESP_LOGE("Nostr", "Failed to get crypto context");
         return -1;
     }
 
@@ -86,7 +125,7 @@ int gen_private_key(uint8_t private_key_bin[32])
     do
     {
         // 生成32字节随机数
-        if (mbedtls_mpi_fill_random(&d, 32, mbedtls_ctr_drbg_random, &ctr_drbg) != 0)
+        if (mbedtls_mpi_fill_random(&d, 32, mbedtls_ctr_drbg_random, ctr_drbg) != 0)
         {
             ESP_LOGE("Nostr", "Failed to generate random private key");
             goto cleanup;
@@ -94,7 +133,7 @@ int gen_private_key(uint8_t private_key_bin[32])
 
         // 确保私钥在有效范围内：1 <= d < N
         if (mbedtls_mpi_cmp_int(&d, 0) <= 0 ||
-            mbedtls_mpi_cmp_mpi(&d, &grp.N) >= 0)
+            mbedtls_mpi_cmp_mpi(&d, &grp->N) >= 0)
         {
             continue; // 生成的密钥无效，重新生成
         }
@@ -112,22 +151,22 @@ int gen_private_key(uint8_t private_key_bin[32])
 
 cleanup:
     mbedtls_mpi_free(&d);
-    mbedtls_ecp_group_free(&grp);
-    mbedtls_ctr_drbg_free(&ctr_drbg);
+    // 不再释放全局上下文
     return ret;
 }
 
 // 核心逻辑：私钥生成公钥
 int get_public(const uint8_t *privkey_bin, uint8_t *pubkey_bin)
 {
-    mbedtls_ecp_group grp;
+    mbedtls_ecp_group *grp;
+    mbedtls_ctr_drbg_context *ctr_drbg;
     mbedtls_ecp_point pub;
     mbedtls_mpi d;
-    mbedtls_ctr_drbg_context ctr_drbg;
     uint8_t temp_pubkey[33]; // 压缩公钥需要33字节
+    int ret = -1;
 
-    if (init_crypto_context(&grp, &ctr_drbg) != 0)
-        return -1;
+    // 获取全局加密上下文
+    CHECK_RETURN_SILENT(get_crypto_context(&grp, &ctr_drbg) == 0, -1);
 
     mbedtls_ecp_point_init(&pub);
     mbedtls_mpi_init(&d);
@@ -136,43 +175,41 @@ int get_public(const uint8_t *privkey_bin, uint8_t *pubkey_bin)
     mbedtls_mpi_read_binary(&d, privkey_bin, 32);
 
     // 计算公钥 Q = d * G
-    if (mbedtls_ecp_mul(&grp, &pub, &d, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg) != 0)
-    {
-        ESP_LOGE("Nostr", "ECP multiply failed");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_mul(grp, &pub, &d, &grp->G, mbedtls_ctr_drbg_random, ctr_drbg) == 0,
+                 -1, "Nostr", "ECP multiply failed");
 
     // 获取压缩格式的公钥（33字节）
     size_t olen;
-    if (mbedtls_ecp_point_write_binary(&grp, &pub, MBEDTLS_ECP_PF_COMPRESSED,
-                                       &olen, temp_pubkey, sizeof(temp_pubkey)) != 0)
-    {
-        ESP_LOGE("Nostr", "Failed to write public key");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_point_write_binary(grp, &pub, MBEDTLS_ECP_PF_COMPRESSED,
+                                                &olen, temp_pubkey, sizeof(temp_pubkey)) == 0,
+                 -1, "Nostr", "Failed to write public key");
 
     // 提取 x 坐标（跳过压缩标志字节）
-    if (olen != 33 || (temp_pubkey[0] != 0x02 && temp_pubkey[0] != 0x03))
-    {
-        ESP_LOGE("Nostr", "Unexpected public key format");
-        goto cleanup;
-    }
+    CHECK_RETURN(olen == 33 && (temp_pubkey[0] == 0x02 || temp_pubkey[0] == 0x03),
+                 -1, "Nostr", "Unexpected public key format");
+
     memcpy(pubkey_bin, temp_pubkey + 1, 32);
+    ret = 0;
 
 cleanup:
-    mbedtls_ecp_group_free(&grp);
     mbedtls_ecp_point_free(&pub);
     mbedtls_mpi_free(&d);
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    return 0;
+    // 不再释放全局上下文
+    return ret;
 }
 
 // 计算 Nostr Event ID
 int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
                  cJSON *tags, const char *content, char *event_id_hex)
 {
+    int ret = -1;
+    cJSON *event_array = NULL;
+    char *json_str = NULL;
+
     // 1. 构建事件数组
-    cJSON *event_array = cJSON_CreateArray();
+    event_array = cJSON_CreateArray();
+    CHECK_RETURN(event_array != NULL, -1, "Nostr", "Failed to create event array");
+
     cJSON_AddItemToArray(event_array, cJSON_CreateNumber(0));          // 固定值 0
     cJSON_AddItemToArray(event_array, cJSON_CreateString(pubkey_hex)); // pubkey
     cJSON_AddItemToArray(event_array, cJSON_CreateNumber(created_at)); // created_at
@@ -181,13 +218,8 @@ int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
     cJSON_AddItemToArray(event_array, cJSON_CreateString(content));    // content
 
     // 2. 序列化为 JSON 字符串
-    char *json_str = cJSON_PrintUnformatted(event_array);
-    if (!json_str)
-    {
-        ESP_LOGE("Nostr", "Failed to serialize event data to JSON");
-        cJSON_Delete(event_array);
-        return -1;
-    }
+    json_str = cJSON_PrintUnformatted(event_array);
+    CHECK_RETURN(json_str != NULL, -1, "Nostr", "Failed to serialize event data to JSON");
 
     // 3. 计算 SHA256 哈希
     uint8_t hash[32];
@@ -200,12 +232,17 @@ int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
 
     // 4. 转换为小写十六进制字符串
     bin_to_hex(hash, sizeof(hash), event_id_hex);
+    ret = 0;
 
+cleanup:
     // 清理资源
-    cJSON_Delete(event_array);
-    free(json_str);
+    if (event_array != NULL)
+    {
+        cJSON_Delete(event_array);
+    }
+    CLEANUP_POINTER(json_str);
 
-    return 0;
+    return ret;
 }
 
 // Tagged Hash 实现
@@ -226,14 +263,14 @@ static void tagged_hash(const char *tag, const uint8_t *data, size_t data_len, u
 
 int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bin)
 {
-    mbedtls_ecp_group grp;
+    mbedtls_ecp_group *grp;
+    mbedtls_ctr_drbg_context *ctr_drbg;
     mbedtls_ecp_point R, P;
     mbedtls_mpi d, k, e, s;
-    mbedtls_ctr_drbg_context ctr_drbg;
     int ret = -1;
 
-    // Initialize cryptographic context
-    if (init_crypto_context(&grp, &ctr_drbg) != 0)
+    // Get global cryptographic context
+    if (get_crypto_context(&grp, &ctr_drbg) != 0)
     {
         return -1;
     }
@@ -250,18 +287,18 @@ int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bi
     MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(&d, privkey_bin, 32));
 
     // 2. Generate public key P = d * G
-    MBEDTLS_MPI_CHK(mbedtls_ecp_mul(&grp, &P, &d, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg));
+    MBEDTLS_MPI_CHK(mbedtls_ecp_mul(grp, &P, &d, &grp->G, mbedtls_ctr_drbg_random, ctr_drbg));
 
     // Get public key in compressed format
     uint8_t pubkey[33];
     size_t olen;
-    MBEDTLS_MPI_CHK(mbedtls_ecp_point_write_binary(&grp, &P, MBEDTLS_ECP_PF_COMPRESSED,
+    MBEDTLS_MPI_CHK(mbedtls_ecp_point_write_binary(grp, &P, MBEDTLS_ECP_PF_COMPRESSED,
                                                    &olen, pubkey, sizeof(pubkey)));
 
     // Check if we need to negate private key (if public key Y is odd)
     if (pubkey[0] == 0x03)
     {
-        mbedtls_mpi_sub_mpi(&d, &grp.N, &d);
+        mbedtls_mpi_sub_mpi(&d, &grp->N, &d);
     }
 
     // 3. Generate deterministic k
@@ -273,19 +310,19 @@ int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bi
     uint8_t k_bytes[32];
     tagged_hash("BIP0340/nonce", nonce_input, sizeof(nonce_input), k_bytes);
     MBEDTLS_MPI_CHK(mbedtls_mpi_read_binary(&k, k_bytes, 32));
-    MBEDTLS_MPI_CHK(mbedtls_mpi_mod_mpi(&k, &k, &grp.N));
+    MBEDTLS_MPI_CHK(mbedtls_mpi_mod_mpi(&k, &k, &grp->N));
 
     // 4. Calculate R = k * G
-    MBEDTLS_MPI_CHK(mbedtls_ecp_mul(&grp, &R, &k, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg));
+    MBEDTLS_MPI_CHK(mbedtls_ecp_mul(grp, &R, &k, &grp->G, mbedtls_ctr_drbg_random, ctr_drbg));
 
     // Get R in compressed format and check if we need to negate k
     uint8_t R_bytes[33];
-    MBEDTLS_MPI_CHK(mbedtls_ecp_point_write_binary(&grp, &R, MBEDTLS_ECP_PF_COMPRESSED,
+    MBEDTLS_MPI_CHK(mbedtls_ecp_point_write_binary(grp, &R, MBEDTLS_ECP_PF_COMPRESSED,
                                                    &olen, R_bytes, sizeof(R_bytes)));
 
     if (R_bytes[0] == 0x03)
     {
-        mbedtls_mpi_sub_mpi(&k, &grp.N, &k);
+        mbedtls_mpi_sub_mpi(&k, &grp->N, &k);
     }
 
     // 5. Calculate challenge e = tagged_hash(R.x || P.x || msg)
@@ -301,7 +338,7 @@ int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bi
     // 6. Calculate s = k + e * d mod n
     MBEDTLS_MPI_CHK(mbedtls_mpi_mul_mpi(&s, &e, &d));
     MBEDTLS_MPI_CHK(mbedtls_mpi_add_mpi(&s, &k, &s));
-    MBEDTLS_MPI_CHK(mbedtls_mpi_mod_mpi(&s, &s, &grp.N));
+    MBEDTLS_MPI_CHK(mbedtls_mpi_mod_mpi(&s, &s, &grp->N));
 
     // 7. Output signature (R.x || s)
     memcpy(sig_bin, R_bytes + 1, 32);                                // First 32 bytes: R.x
@@ -310,14 +347,13 @@ int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bi
     ret = 0; // Success
 
 cleanup:
-    mbedtls_ecp_group_free(&grp);
     mbedtls_ecp_point_free(&R);
     mbedtls_ecp_point_free(&P);
     mbedtls_mpi_free(&d);
     mbedtls_mpi_free(&k);
     mbedtls_mpi_free(&e);
     mbedtls_mpi_free(&s);
-    mbedtls_ctr_drbg_free(&ctr_drbg);
+    // 不再释放全局上下文
     return ret;
 }
 
@@ -376,17 +412,14 @@ unsigned char *base64_decode(const char *data, size_t input_length, size_t *outp
 // 计算共享密钥
 static int compute_shared_secret(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, uint8_t *shared_x)
 {
-    mbedtls_ecp_group grp;
+    mbedtls_ecp_group *grp;
+    mbedtls_ctr_drbg_context *ctr_drbg;
     mbedtls_ecp_point their_pub, shared_point;
     mbedtls_mpi our_priv;
     uint8_t temp_pubkey_bin[33];
-    mbedtls_ctr_drbg_context ctr_drbg;
     int ret = -1;
 
-    if (init_crypto_context(&grp, &ctr_drbg) != 0)
-    {
-        return -1;
-    }
+    CHECK_RETURN_SILENT(get_crypto_context(&grp, &ctr_drbg) == 0, -1);
 
     mbedtls_ecp_point_init(&their_pub);
     mbedtls_ecp_point_init(&shared_point);
@@ -396,46 +429,44 @@ static int compute_shared_secret(const uint8_t *our_privkey_bin, const uint8_t *
     temp_pubkey_bin[0] = 0x02; // 强制使用压缩格式
 
     // 解析公钥点
-    if (mbedtls_ecp_point_read_binary(&grp, &their_pub, temp_pubkey_bin, 33) != 0)
+    if (mbedtls_ecp_point_read_binary(grp, &their_pub, temp_pubkey_bin, 33) != 0)
     {
         ESP_LOGE("NIP44", "公钥解析失败");
         goto cleanup;
     }
+    mbedtls_ecp_point_init(&their_pub);
+    mbedtls_ecp_point_init(&shared_point);
+    mbedtls_mpi_init(&our_priv);
+
+    memcpy(temp_pubkey_bin + 1, their_pubkey_bin, 32);
+    temp_pubkey_bin[0] = 0x02; // 强制使用压缩格式
+
+    // 解析公钥点
+    CHECK_RETURN(mbedtls_ecp_point_read_binary(grp, &their_pub, temp_pubkey_bin, 33) == 0,
+                 -1, "NIP44", "公钥解析失败");
 
     // 验证公钥有效性
-    if (mbedtls_ecp_check_pubkey(&grp, &their_pub) != 0)
-    {
-        ESP_LOGE("NIP44", "无效的公钥点");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_check_pubkey(grp, &their_pub) == 0,
+                 -1, "NIP44", "无效的公钥点");
 
     uint8_t our_privkey_bin_copy[32];
     memcpy(our_privkey_bin_copy, our_privkey_bin, 32); // 拷贝，避免被修改
     mbedtls_mpi_read_binary(&our_priv, our_privkey_bin_copy, 32);
 
     // 计算共享点
-    if (mbedtls_ecp_mul(&grp, &shared_point, &our_priv, &their_pub, mbedtls_ctr_drbg_random, &ctr_drbg) != 0)
-    {
-        ESP_LOGE("NIP44", "椭圆曲线乘法失败");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_mul(grp, &shared_point, &our_priv, &their_pub, mbedtls_ctr_drbg_random, ctr_drbg) == 0,
+                 -1, "NIP44", "椭圆曲线乘法失败");
 
     // 验证共享点有效性
-    if (mbedtls_ecp_check_pubkey(&grp, &shared_point) != 0)
-    {
-        ESP_LOGE("NIP44", "无效的共享点");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_check_pubkey(grp, &shared_point) == 0,
+                 -1, "NIP44", "无效的共享点");
 
     // 提取X坐标
     size_t olen;
     uint8_t shared_point_bin[33];
-    if (mbedtls_ecp_point_write_binary(&grp, &shared_point, MBEDTLS_ECP_PF_COMPRESSED,
-                                       &olen, shared_point_bin, sizeof(shared_point_bin)) != 0)
-    {
-        ESP_LOGE("NIP44", "共享点序列化失败");
-        goto cleanup;
-    }
+    CHECK_RETURN(mbedtls_ecp_point_write_binary(grp, &shared_point, MBEDTLS_ECP_PF_COMPRESSED,
+                                                &olen, shared_point_bin, sizeof(shared_point_bin)) == 0,
+                 -1, "NIP44", "共享点序列化失败");
 
     // 调试输出
     // char debug_buf[65] = {0};
@@ -446,11 +477,10 @@ static int compute_shared_secret(const uint8_t *our_privkey_bin, const uint8_t *
     ret = 0;
 
 cleanup:
-    mbedtls_ecp_group_free(&grp);
     mbedtls_ecp_point_free(&their_pub);
     mbedtls_ecp_point_free(&shared_point);
     mbedtls_mpi_free(&our_priv);
-    mbedtls_ctr_drbg_free(&ctr_drbg);
+    // 不再释放全局上下文
     return ret;
 }
 
@@ -664,29 +694,16 @@ int nip04_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
         return -1;
     }
 
-    // 生成随机 IV
-    mbedtls_ctr_drbg_context ctr_drbg;
-    mbedtls_entropy_context entropy;
-    mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-    if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, NULL, 0) != 0)
-    {
-        ESP_LOGE("NIP04", "CTR_DRBG seeding failed");
-        mbedtls_ctr_drbg_free(&ctr_drbg);
-        mbedtls_entropy_free(&entropy);
-        return -1;
-    }
-
+    // 生成随机 IV，使用全局的CTR_DRBG
     uint8_t iv[16];
-    if (mbedtls_ctr_drbg_random(&ctr_drbg, iv, sizeof(iv)) != 0)
+    mbedtls_ecp_group *grp;
+    mbedtls_ctr_drbg_context *global_ctr_drbg;
+    if (get_crypto_context(&grp, &global_ctr_drbg) != 0 ||
+        mbedtls_ctr_drbg_random(global_ctr_drbg, iv, sizeof(iv)) != 0)
     {
         ESP_LOGE("NIP04", "IV generation failed");
-        mbedtls_ctr_drbg_free(&ctr_drbg);
-        mbedtls_entropy_free(&entropy);
         return -1;
     }
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
 
     uint8_t *encrypted_text = NULL;
     size_t encrypted_len;
@@ -953,24 +970,43 @@ int hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t 
     return 0;
 }
 
+// HMAC-SHA256 计算（两段数据，无需拼接缓冲区）
+static int hmac_sha256_2parts(const uint8_t *key, size_t key_len,
+                              const uint8_t *data1, size_t len1,
+                              const uint8_t *data2, size_t len2,
+                              uint8_t *output)
+{
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    if (mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1) != 0)
+    {
+        mbedtls_md_free(&ctx);
+        return -1;
+    }
+    if (mbedtls_md_hmac_starts(&ctx, key, key_len) != 0 ||
+        mbedtls_md_hmac_update(&ctx, data1, len1) != 0 ||
+        mbedtls_md_hmac_update(&ctx, data2, len2) != 0 ||
+        mbedtls_md_hmac_finish(&ctx, output) != 0)
+    {
+        mbedtls_md_free(&ctx);
+        return -1;
+    }
+    mbedtls_md_free(&ctx);
+    return 0;
+}
+
 // NIP44加密函数
 int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
                   const char *text, char **encrypted_content)
 {
 
     uint8_t shared_x[32];
-    uint8_t *cipher = NULL;
     uint8_t *payload = NULL;
     uint8_t *padded_text = NULL;
-    uint8_t *mac_input = NULL;
     mbedtls_chacha20_context ctx;
-    mbedtls_ctr_drbg_context ctr_drbg;
-    mbedtls_entropy_context entropy;
     int ret = -1;
 
     mbedtls_chacha20_init(&ctx);
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-    mbedtls_entropy_init(&entropy);
 
     // 1. Compute shared secret
     if (compute_shared_secret(our_privkey_bin, their_pubkey_bin, shared_x) != 0)
@@ -981,8 +1017,11 @@ int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
 
     // 2. Generate random nonce (32 bytes)
     uint8_t nonce[32];
-    if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, NULL, 0) != 0 ||
-        mbedtls_ctr_drbg_random(&ctr_drbg, nonce, sizeof(nonce)) != 0)
+    // 直接使用全局的CTR_DRBG，避免重复初始化
+    mbedtls_ecp_group *grp;
+    mbedtls_ctr_drbg_context *global_ctr_drbg;
+    if (get_crypto_context(&grp, &global_ctr_drbg) != 0 ||
+        mbedtls_ctr_drbg_random(global_ctr_drbg, nonce, sizeof(nonce)) != 0)
     {
         ESP_LOGE("NIP44", "Nonce generation failed");
         goto cleanup;
@@ -1004,37 +1043,7 @@ int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
         goto cleanup;
     }
 
-    // 5. ChaCha20 encryption
-    if ((cipher = malloc(padded_len)) == NULL)
-    {
-        ESP_LOGE("NIP44", "Memory allocation failed");
-        goto cleanup;
-    }
-    if (mbedtls_chacha20_setkey(&ctx, chacha_key) != 0 ||
-        mbedtls_chacha20_starts(&ctx, chacha_nonce, 0) != 0 ||
-        mbedtls_chacha20_update(&ctx, padded_len, padded_text, cipher) != 0)
-    {
-        ESP_LOGE("NIP44", "Encryption failed");
-        goto cleanup;
-    }
-
-    // 6. Compute HMAC-SHA256 (nonce || cipher)
-    if ((mac_input = malloc(32 + padded_len)) == NULL)
-    {
-        ESP_LOGE("NIP44", "Memory allocation failed");
-        goto cleanup;
-    }
-    memcpy(mac_input, nonce, 32);
-    memcpy(mac_input + 32, cipher, padded_len);
-
-    uint8_t mac[32];
-    if (hmac_sha256(hmac_key, 32, mac_input, 32 + padded_len, mac) != 0)
-    {
-        ESP_LOGE("NIP44", "HMAC calculation failed");
-        goto cleanup;
-    }
-
-    // 7. Build payload: version(1) + nonce(32) + cipher + mac(32)
+    // 5. 预分配 payload 并直接加密入内（消除独立的 cipher 缓冲区）
     const size_t payload_size = 1 + 32 + padded_len + 32;
     if ((payload = malloc(payload_size)) == NULL)
     {
@@ -1043,7 +1052,27 @@ int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
     }
     payload[0] = 0x02; // version
     memcpy(payload + 1, nonce, 32);
-    memcpy(payload + 33, cipher, padded_len);
+
+    // 直接将 padded_text 加密写入 payload+33，无需中间 cipher 缓冲区
+    if (mbedtls_chacha20_setkey(&ctx, chacha_key) != 0 ||
+        mbedtls_chacha20_starts(&ctx, chacha_nonce, 0) != 0 ||
+        mbedtls_chacha20_update(&ctx, padded_len, padded_text, payload + 33) != 0)
+    {
+        ESP_LOGE("NIP44", "Encryption failed");
+        goto cleanup;
+    }
+    free(padded_text);
+    padded_text = NULL;
+
+    // 6. 计算 HMAC-SHA256(nonce || cipher)，无需拼接缓冲区
+    uint8_t mac[32];
+    if (hmac_sha256_2parts(hmac_key, 32, payload + 1, 32, payload + 33, padded_len, mac) != 0)
+    {
+        ESP_LOGE("NIP44", "HMAC calculation failed");
+        goto cleanup;
+    }
+
+    // 7. 把 MAC 追加到 payload 末尾
     memcpy(payload + 33 + padded_len, mac, 32);
 
     // 8. Base64 encode
@@ -1057,16 +1086,10 @@ int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
 
 cleanup:
     mbedtls_chacha20_free(&ctx);
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
     if (padded_text)
         free(padded_text);
-    if (cipher)
-        free(cipher);
     if (payload)
         free(payload);
-    if (mac_input)
-        free(mac_input);
     return ret;
 }
 
@@ -1075,7 +1098,6 @@ int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
                   const char *encrypted_content, char **decrypted_text)
 {
     uint8_t *payload = NULL;
-    uint8_t *mac_input = NULL;
     mbedtls_chacha20_context ctx;
     int ret = -1;
     size_t payload_len;
@@ -1093,7 +1115,7 @@ int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
 
     // 2. Parse components
     const uint8_t *nonce = payload + 1;
-    const uint8_t *cipher = payload + 33;
+    uint8_t *cipher = payload + 33;
     const size_t cipher_len = payload_len - 33 - 32;
     const uint8_t *mac = payload + 33 + cipher_len;
 
@@ -1113,17 +1135,9 @@ int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
         goto cleanup;
     }
 
-    // 5. Verify HMAC
-    if ((mac_input = malloc(32 + cipher_len)) == NULL)
-    {
-        ESP_LOGE("NIP44", "Memory allocation failed");
-        goto cleanup;
-    }
-    memcpy(mac_input, nonce, 32);
-    memcpy(mac_input + 32, cipher, cipher_len);
-
+    // 5. Verify HMAC（无需拼接缓冲区）
     uint8_t computed_mac[32];
-    if (hmac_sha256(hmac_key, 32, mac_input, 32 + cipher_len, computed_mac) != 0)
+    if (hmac_sha256_2parts(hmac_key, 32, nonce, 32, cipher, cipher_len, computed_mac) != 0)
     {
         ESP_LOGE("NIP44", "HMAC calculation failed");
         goto cleanup;
@@ -1134,22 +1148,17 @@ int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bi
         goto cleanup;
     }
 
-    // 6. Decrypt
-    uint8_t *decrypted = malloc(cipher_len);
+    // 6. 原地解密（ChaCha20 流密码支持 input==output 原地操作）
     if (mbedtls_chacha20_setkey(&ctx, chacha_key) != 0 ||
         mbedtls_chacha20_starts(&ctx, chacha_nonce, 0) != 0 ||
-        mbedtls_chacha20_update(&ctx, cipher_len, cipher, decrypted) != 0)
+        mbedtls_chacha20_update(&ctx, cipher_len, cipher, cipher) != 0)
     {
         ESP_LOGE("NIP44", "Decryption failed");
-        if (decrypted)
-            free(decrypted);
         goto cleanup;
     }
 
-    // 7. Unpad
-    char *unpadded = nip44_unpad(decrypted, cipher_len);
-    if (decrypted)
-        free(decrypted);
+    // 7. 直接在 payload 缓冲区中去填充，无需额外 alloc
+    char *unpadded = nip44_unpad(cipher, cipher_len);
     if (!unpadded)
     {
         ESP_LOGE("NIP44", "Unpadding failed");
@@ -1163,7 +1172,5 @@ cleanup:
     mbedtls_chacha20_free(&ctx);
     if (payload)
         free(payload);
-    if (mac_input)
-        free(mac_input);
     return ret;
 }
