@@ -1,7 +1,5 @@
 #include <stdio.h>
 #include <string.h>
-#include "driver/uart.h"
-#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
@@ -14,15 +12,11 @@
 #include "store.h"
 #include "msg_result.h"
 #include "utils.h"
-#include "tinyusb.h"
-#include "tusb_cdc_acm.h"
+#include "signer_transport.h"
 #include "sdkconfig.h"
 #include "memory_pool.h"
 #include "error_handling.h"
 
-// #define UART_PORT_NUM UART_NUM_0 // 使用 UART0（USB-JTAG/Serial 控制器）
-#define UART_PORT_NUM UART_NUM_2 // 使用 UART0（USB-JTAG/Serial 控制器）
-#define UART_BAUD_RATE 115200    // 波特率
 #define TYPE_SIZE 2              // 消息类型长度（固定 2 字节）
 #define RESULT_SIZE 2            // 消息结果长度（固定 2 字节）（仅在result中有）
 #define ID_SIZE 16               // 消息 ID 长度（固定 16 字节）
@@ -83,7 +77,7 @@ uint16_t crc16(uint8_t *data, size_t len)
 // 消息结构体
 typedef struct
 {
-    uint8_t itf; // Index of CDC device interface
+    uint8_t itf; // Index of transport device interface
     uint16_t message_type;
     uint8_t message_id[ID_SIZE];
     uint8_t pubkey[PUBKEY_SIZE];
@@ -95,7 +89,7 @@ typedef struct
 // 响应消息结构体
 typedef struct
 {
-    uint8_t itf;   // Index of CDC device interface
+    uint8_t itf;   // Index of transport device interface
     uint8_t *data; // Complete response data
     int data_len;
     MessageBuffer *pool_buffer; // 非NULL=池缓冲区，由接收方调用memory_pool_release；NULL=堆内存，由接收方调用free
@@ -110,97 +104,6 @@ bool is_timeout(uint64_t start_time, uint64_t timeout_ms)
 {
     uint64_t current_time = esp_timer_get_time() / 1000; // 转换为毫秒
     return (current_time - start_time) >= timeout_ms;
-}
-
-// 读取固定长度的数据
-bool read_fixed_length_data(uint8_t *buffer, int length, uint64_t timeout_ms)
-{
-    int received = 0;
-    uint64_t start_time = esp_timer_get_time() / 1000; // 记录开始时间
-
-    while (received < length)
-    {
-        int len = uart_read_bytes(UART_PORT_NUM, buffer + received, length - received, 20 / portTICK_PERIOD_MS);
-        if (len > 0)
-        {
-            received += len;
-            start_time = esp_timer_get_time() / 1000; // 重置开始时间
-        }
-
-        // 检查是否超时
-        if (is_timeout(start_time, timeout_ms))
-        {
-            return false; // 读取超时
-        }
-    }
-    return true; // 成功读取
-}
-
-// handle uart send
-void uart_send_data(uint8_t *message, size_t message_len)
-{
-    size_t total_sent = 0;
-    const uint8_t *data_ptr = message;
-    size_t remaining = message_len;
-
-    while (remaining > 0)
-    {
-        // 调用 uart_write_bytes 发送数据
-        size_t send_length = uart_write_bytes(UART_PORT_NUM, (const char *)data_ptr, remaining);
-
-        if (send_length == 0)
-        {
-            // 发送失败，适当延时避免忙等待
-            vTaskDelay(pdMS_TO_TICKS(1));
-            continue;
-        }
-
-        total_sent += send_length;
-        data_ptr += send_length;
-        remaining -= send_length;
-    }
-}
-
-// handle usb send
-void usb_send_data(uint8_t itf, uint8_t *message, int message_len)
-{
-    size_t total_sent = 0;
-    const uint8_t *data_ptr = (const uint8_t *)message;
-    size_t remaining = message_len;
-    uint32_t start_time = esp_timer_get_time() / 1000; // 记录开始时间
-    const uint32_t timeout_ms = 5000;                  // 设置超时时间为 5 秒
-
-    while (remaining > 0)
-    {
-        size_t send_length = tinyusb_cdcacm_write_queue(itf, (const char *)data_ptr, remaining);
-
-        if (send_length == 0)
-        {
-            // 检查是否超时
-            if ((esp_timer_get_time() / 1000 - start_time) >= timeout_ms)
-            {
-                ESP_LOGE(TAG, "USB send timeout");
-                break;
-            }
-            // 主动刷新USB传输，腾出发送缓冲区空间（替代盲等待）
-            tinyusb_cdcacm_write_flush(itf, pdMS_TO_TICKS(10));
-            continue;
-        }
-
-        total_sent += send_length;
-        data_ptr += send_length;
-        remaining -= send_length;
-
-        // printf("Partial send: %d, Total sent: %d, Remaining: %d\n",
-        //        send_length, total_sent, remaining);
-    }
-
-    // 发送完毕后最终刷新，确保数据全部传出
-    esp_err_t flush_err = tinyusb_cdcacm_write_flush(itf, 10000);
-    if (flush_err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "CDC ACM write flush error: %s", esp_err_to_name(flush_err));
-    }
 }
 
 // 发送响应消息
@@ -256,9 +159,9 @@ void send_response(uint8_t itf, uint16_t message_result, uint16_t message_type, 
 
     if (itf >= ITF_MAX)
     {
-        // send by uart
+        // send directly
         buffer->used_size = whole_msg_len;
-        uart_send_data(whole_msg, whole_msg_len);
+        signer_transport_send(itf, whole_msg, whole_msg_len);
         memory_pool_release(buffer);
     }
     else
@@ -553,275 +456,83 @@ void handle_message_task(void *pvParameters)
     }
 }
 
-void uart_config()
+#define PROTOCOL_BUFFER_SIZE 4096
+static uint8_t s_proto_msg_buffer[PROTOCOL_BUFFER_SIZE];
+static size_t s_proto_msg_buffer_size = 0;
+static uint64_t s_start_read_time = 0;
+
+static void on_raw_rx_data(uint8_t itf, const uint8_t *data, size_t rx_size)
 {
-    // 配置 UART
-    uart_config_t uart_config = {
-        .baud_rate = UART_BAUD_RATE,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-
-    // 安装 UART 驱动程序
-    ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, GPIO_NUM_4, GPIO_NUM_5, -1, -1));
-    ESP_ERROR_CHECK(uart_driver_install(UART_PORT_NUM, MAX_MESSAGE_SIZE * 2, 0, 0, NULL, 0));
-    ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));
-}
-
-void uart_data_receive()
-{
-    uint8_t type[TYPE_SIZE];     // 用于存储消息类型
-    uint8_t id[ID_SIZE];         // 用于存储消息 ID
-    uint8_t pubkey[PUBKEY_SIZE]; // 用于Pubkey
-    uint8_t iv[IV_SIZE];         // 用于 IV
-    uint8_t header[HEADER_SIZE]; // 用于存储消息头
-    uint8_t crc[CRC_SIZE];       // 用于 CRC
-
-    while (1)
-    {
-        // 读取消息类型
-        if (!read_fixed_length_data(type, TYPE_SIZE, READ_TIMEOUT_MS))
-            continue;
-
-        // 解析消息类型
-        uint16_t message_type = (type[0] << 8) | type[1];
-        ESP_LOGI(TAG, "message_type %d %d %d", message_type, type[0], type[1]);
-
-        // 直接读取二进制ID
-        if (!read_fixed_length_data(id, ID_SIZE, READ_TIMEOUT_MS))
-            continue;
-
-        // printByteArrayAsDec((char *)id, ID_SIZE);
-
-        // 读取二进制pubkey
-        if (!read_fixed_length_data(pubkey, PUBKEY_SIZE, READ_TIMEOUT_MS))
-            continue;
-
-        // printByteArrayAsDec((char *)pubkey, PUBKEY_SIZE);
-
-        // 读取二进制iv
-        if (!read_fixed_length_data(iv, IV_SIZE, READ_TIMEOUT_MS))
-            continue;
-
-        // printByteArrayAsDec((char *)iv, IV_SIZE);
-
-        // 读取消息头
-        if (!read_fixed_length_data(header, HEADER_SIZE, READ_TIMEOUT_MS))
-            continue;
-
-        // printByteArrayAsDec((char *)header, HEADER_SIZE);
-
-        // 解析消息头，获取消息长度
-        uint32_t total_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
-        ESP_LOGI(TAG, "total_len %d %d %d %d %d", (int)total_len, header[0], header[1], header[2], header[3]);
-
-        // 读取加密数据
-        uint8_t *encrypted = malloc(total_len);
-        if (!read_fixed_length_data(encrypted, total_len, READ_TIMEOUT_MS))
-        {
-            free(encrypted);
-            continue;
-        }
-
-        // 读取二进制crc
-        if (!read_fixed_length_data(crc, CRC_SIZE, READ_TIMEOUT_MS))
-        {
-            free(encrypted);
-            continue;
-        }
-
-        // printByteArrayAsDec((char *)crc, CRC_SIZE);
-
-        // 验证CRC
-        uint16_t received_crc = (crc[0] << 8) | crc[1];
-        // 创建一个临时缓冲区来存储整个消息
-        size_t whole_msg_len = TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE + total_len;
-        uint8_t *whole_msg = malloc(whole_msg_len);
-        if (whole_msg == NULL)
-        {
-            free(encrypted);
-            continue;
-        }
-        memcpy(whole_msg, type, TYPE_SIZE);
-        memcpy(whole_msg + TYPE_SIZE, id, ID_SIZE);
-        memcpy(whole_msg + TYPE_SIZE + ID_SIZE, pubkey, PUBKEY_SIZE);
-        memcpy(whole_msg + TYPE_SIZE + ID_SIZE + PUBKEY_SIZE, iv, IV_SIZE);
-        memcpy(whole_msg + TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE, header, HEADER_SIZE);
-        if (total_len > 0)
-        {
-            memcpy(whole_msg + TYPE_SIZE + ID_SIZE + PUBKEY_SIZE + IV_SIZE + HEADER_SIZE, encrypted, total_len);
-        }
-
-        if (crc16(whole_msg, whole_msg_len) != received_crc)
-        {
-            char id_hex[ID_SIZE * 2 + 1];
-            bin_to_hex(id, ID_SIZE, id_hex);
-            ESP_LOGE(TAG, "CRC Error ID: %s", id_hex);
-            free(encrypted);
-            free(whole_msg);
-            continue;
-        }
-        free(whole_msg);
-
-        // 构造消息
-        message_t msg = {
-            .itf = ITF_MAX,
-            .message_type = message_type,
-            .message_len = total_len};
-        memcpy(msg.message_id, id, ID_SIZE);
-        memcpy(msg.pubkey, pubkey, PUBKEY_SIZE);
-        memcpy(msg.iv, iv, IV_SIZE);
-        msg.message = malloc(total_len);
-        memcpy(msg.message, encrypted, total_len);
-        xQueueSend(message_queue, &msg, 0);
-        free(encrypted);
-
-        ESP_LOGI(TAG, "msg sended to queue");
-    }
-}
-
-/**
- * @brief USB Message Queue
- */
-static QueueHandle_t usb_msg_queue;
-typedef struct
-{
-    uint8_t buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1]; // Data buffer
-    size_t buf_len;                                 // Number of bytes received
-    uint8_t itf;                                    // Index of CDC device interface
-} usb_message_t;
-
-// 自定义 USB 配置
-#define USB_VID 0x2323 // 自定义厂商ID
-#define USB_PID 0x3434 // 自定义产品ID
-
-// USB 设备描述符
-static tusb_desc_device_t descriptor_dev = {
-    .bLength = sizeof(tusb_desc_device_t),
-    .bDescriptorType = TUSB_DESC_DEVICE,
-    .bcdUSB = 0x0200,
-    // .bDeviceClass = TUSB_CLASS_VENDOR_SPECIFIC,
-    // .bDeviceSubClass = 0x00,
-    // .bDeviceProtocol = 0x00,
-    .bDeviceClass = TUSB_CLASS_MISC,         // 0xEF // 改成这样子，在 MacOS 下才能识别为串口设备
-    .bDeviceSubClass = MISC_SUBCLASS_COMMON, // 0x02
-    .bDeviceProtocol = MISC_PROTOCOL_IAD,    // 0x01
-    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
-    .idVendor = USB_VID,
-    .idProduct = USB_PID,
-    .bcdDevice = 0x0100,
-    .iManufacturer = 0x01,
-    .iProduct = 0x02,
-    .iSerialNumber = 0x03,
-    .bNumConfigurations = 0x01};
-
-static uint8_t usb_msg_buffer[CONFIG_TINYUSB_CDC_RX_BUFSIZE * 8];
-
-static size_t usb_msg_buffer_size = 0;
-
-static uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE * 4];
-
-// 记录上次接收到数据的时间，单位毫秒
-static uint64_t usb_start_read_time = 0;
-
-/**
- * @brief CDC device RX callback
- *
- * CDC device signals, that new data were received
- *
- * @param[in] itf   CDC device index
- * @param[in] event CDC event type
- */
-void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
-{
-    // 检查是否超时
     uint64_t current_time = esp_timer_get_time() / 1000;
-    if (usb_start_read_time > 0 && (current_time - usb_start_read_time) >= READ_TIMEOUT_MS)
+    if (s_start_read_time > 0 && (current_time - s_start_read_time) >= READ_TIMEOUT_MS)
     {
-        ESP_LOGE(TAG, "USB read timeout");
-        // 清除已接收的数据
-        usb_msg_buffer_size = 0;
-        usb_start_read_time = 0;
+        ESP_LOGE(TAG, "Transport read timeout");
+        s_proto_msg_buffer_size = 0;
+        s_start_read_time = 0;
     }
 
-    if (usb_start_read_time == 0)
+    if (s_start_read_time == 0)
     {
-        usb_start_read_time = current_time;
+        s_start_read_time = current_time;
     }
 
-    /* initialization */
-    size_t rx_size = 0;
-
-    /* read */
-    esp_err_t ret = tinyusb_cdcacm_read(itf, rx_buf, CONFIG_TINYUSB_CDC_RX_BUFSIZE, &rx_size);
-    if (ret == ESP_OK)
+    if (s_proto_msg_buffer_size + rx_size > PROTOCOL_BUFFER_SIZE)
     {
-        memcpy(usb_msg_buffer + usb_msg_buffer_size, rx_buf, rx_size);
-        usb_msg_buffer_size += rx_size;
+        ESP_LOGE(TAG, "Protocol buffer overflow, resetting");
+        s_proto_msg_buffer_size = 0;
+        s_start_read_time = 0;
+        return;
+    }
 
-        // 至少需要读取到消息头和长度信息才能继续处理
-        if (usb_msg_buffer_size < REQUEST_HEAD_LEN)
-        {
-            return;
-        }
+    memcpy(s_proto_msg_buffer + s_proto_msg_buffer_size, data, rx_size);
+    s_proto_msg_buffer_size += rx_size;
 
+    while (s_proto_msg_buffer_size >= REQUEST_HEAD_LEN)
+    {
         size_t offset = 0;
 
         uint8_t type[TYPE_SIZE];
-        memcpy(type, usb_msg_buffer + offset, TYPE_SIZE);
+        memcpy(type, s_proto_msg_buffer + offset, TYPE_SIZE);
         offset += TYPE_SIZE;
 
-        // printByteArrayAsDec(type, TYPE_SIZE);
-
         uint8_t id[ID_SIZE];
-        memcpy(id, usb_msg_buffer + offset, ID_SIZE);
+        memcpy(id, s_proto_msg_buffer + offset, ID_SIZE);
         offset += ID_SIZE;
 
         uint8_t pubkey[PUBKEY_SIZE];
-        memcpy(pubkey, usb_msg_buffer + offset, PUBKEY_SIZE);
+        memcpy(pubkey, s_proto_msg_buffer + offset, PUBKEY_SIZE);
         offset += PUBKEY_SIZE;
 
         uint8_t iv[IV_SIZE];
-        memcpy(iv, usb_msg_buffer + offset, IV_SIZE);
+        memcpy(iv, s_proto_msg_buffer + offset, IV_SIZE);
         offset += IV_SIZE;
 
         uint8_t header[HEADER_SIZE];
-        memcpy(header, usb_msg_buffer + offset, HEADER_SIZE);
+        memcpy(header, s_proto_msg_buffer + offset, HEADER_SIZE);
         offset += HEADER_SIZE;
 
-        // printByteArrayAsDec((char *)header, HEADER_SIZE);
-
-        // 解析数据长度
         uint32_t data_len = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
-
-        // 计算整个消息的长度（包含 CRC）
         size_t whole_msg_len = REQUEST_HEAD_LEN + data_len + CRC_SIZE;
 
-        // 检查是否有足够的数据读取加密内容
-        if (usb_msg_buffer_size < whole_msg_len)
-            return; // 数据不足，等待更多
-
-        // 读取 CRC
-        uint8_t crc[CRC_SIZE];
-        memcpy(crc, usb_msg_buffer + REQUEST_HEAD_LEN + data_len, CRC_SIZE);
-
-        // 验证 CRC
-        uint16_t received_crc = (crc[0] << 8) | crc[1];
-        uint16_t computed_crc = crc16(usb_msg_buffer, REQUEST_HEAD_LEN + data_len);
-        if (computed_crc != received_crc)
+        if (s_proto_msg_buffer_size < whole_msg_len)
         {
-            ESP_LOGE(TAG, "CRC check failed");
-            // 移除已处理的数据
-            usb_msg_buffer_size -= whole_msg_len;
-            memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
-            usb_start_read_time = 0;
             return;
         }
 
-        // 构造消息
+        uint8_t crc[CRC_SIZE];
+        memcpy(crc, s_proto_msg_buffer + REQUEST_HEAD_LEN + data_len, CRC_SIZE);
+
+        uint16_t received_crc = (crc[0] << 8) | crc[1];
+        uint16_t computed_crc = crc16(s_proto_msg_buffer, REQUEST_HEAD_LEN + data_len);
+        if (computed_crc != received_crc)
+        {
+            ESP_LOGE(TAG, "CRC check failed");
+            s_proto_msg_buffer_size -= whole_msg_len;
+            memmove(s_proto_msg_buffer, s_proto_msg_buffer + whole_msg_len, s_proto_msg_buffer_size);
+            s_start_read_time = 0;
+            return;
+        }
+
         message_t message = {
             .itf = itf,
             .message_type = (type[0] << 8) | type[1],
@@ -836,117 +547,28 @@ void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
             if (!message.message)
             {
                 ESP_LOGE(TAG, "Failed to allocate memory for encrypted data");
-                // 移除已处理的数据
-                usb_msg_buffer_size -= whole_msg_len;
-                memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
-                usb_start_read_time = 0;
+                s_proto_msg_buffer_size -= whole_msg_len;
+                memmove(s_proto_msg_buffer, s_proto_msg_buffer + whole_msg_len, s_proto_msg_buffer_size);
+                s_start_read_time = 0;
                 return;
             }
-            memcpy(message.message, usb_msg_buffer + REQUEST_HEAD_LEN, data_len);
+            memcpy(message.message, s_proto_msg_buffer + REQUEST_HEAD_LEN, data_len);
         }
 
-        // 移除已处理的数据
-        usb_msg_buffer_size -= whole_msg_len;
-        memmove(usb_msg_buffer, usb_msg_buffer + whole_msg_len, usb_msg_buffer_size);
+        s_proto_msg_buffer_size -= whole_msg_len;
+        memmove(s_proto_msg_buffer, s_proto_msg_buffer + whole_msg_len, s_proto_msg_buffer_size);
 
-        // 发送到队列，使用较短的超时时间，避免阻塞USB接收回调
         if (xQueueSend(message_queue, &message, pdMS_TO_TICKS(100)) != pdPASS)
         {
             ESP_LOGE(TAG, "Failed to send message to queue - queue full");
-            free(message.message);
-            // 可以考虑在这里添加流量控制，如暂停接收或通知上层
+            if (data_len > 0)
+            {
+                free(message.message);
+            }
         }
 
-        usb_start_read_time = 0;
+        s_start_read_time = 0;
     }
-    else
-    {
-        ESP_LOGE(TAG, "Read Error");
-    }
-}
-
-/**
- * @brief CDC device line change callback
- *
- * CDC device signals, that the DTR, RTS states changed
- *
- * @param[in] itf   CDC device index
- * @param[in] event CDC event type
- */
-void tinyusb_cdc_line_state_changed_callback(int itf, cdcacm_event_t *event)
-{
-    int dtr = event->line_state_changed_data.dtr;
-    int rts = event->line_state_changed_data.rts;
-    ESP_LOGI(TAG, "Line state changed on channel %d: DTR:%d, RTS:%d", itf, dtr, rts);
-}
-
-static uint8_t const desc_configuration[] = {
-    // Config number, interface count, string index, total length, attribute, power in mA
-    TUD_CONFIG_DESCRIPTOR(1, 2, 0, (TUD_CDC_DESC_LEN), TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
-
-    // CDC Interface
-    TUD_CDC_DESCRIPTOR(1,    // Interface number (使用0作为主接口)
-                       4,    // String index for interface
-                       0x81, // EP notification address
-                       64,   // EP notification size
-                       0x82, // EP OUT address
-                       0x02, // EP IN addres
-                       64)   // EP size (64 bytes)
-};
-
-void usb_config()
-{
-    // 定义字符串描述符数组，索引0通常是语言ID，后续为各字符串
-    static const char *string_desc_arr[] = {
-        [0] = "",               // 语言ID（通常为空）
-        [1] = "haorendashu",    // iManufacturer（索引1）
-        [2] = "nesigner",       // iProduct（索引2）
-        [3] = "123456",         // iSerialNumber（索引3）
-        [4] = "A nostr signer", // iInterface（索引4）
-    };
-
-    const tinyusb_config_t tusb_cfg = {
-        .device_descriptor = &descriptor_dev,
-        .string_descriptor = string_desc_arr,
-        .external_phy = false,
-        .configuration_descriptor = desc_configuration,
-#if (TUD_OPT_HIGH_SPEED)
-        .fs_configuration_descriptor = NULL,
-        .hs_configuration_descriptor = NULL,
-        .qualifier_descriptor = NULL,
-#else
-        .configuration_descriptor = NULL,
-#endif // TUD_OPT_HIGH_SPEED
-    };
-
-    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
-
-    tinyusb_config_cdcacm_t acm_cfg = {
-        .usb_dev = TINYUSB_USBDEV_0,
-        .cdc_port = TINYUSB_CDC_ACM_0,
-        .rx_unread_buf_sz = 64,
-        .callback_rx = &tinyusb_cdc_rx_callback, // the first way to register a callback
-        .callback_rx_wanted_char = NULL,
-        .callback_line_state_changed = NULL,
-        .callback_line_coding_changed = NULL};
-
-    ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
-    /* the second way to register a callback */
-    ESP_ERROR_CHECK(tinyusb_cdcacm_register_callback(
-        TINYUSB_CDC_ACM_0,
-        CDC_EVENT_LINE_STATE_CHANGED,
-        &tinyusb_cdc_line_state_changed_callback));
-
-#if (CONFIG_TINYUSB_CDC_COUNT > 1)
-    acm_cfg.cdc_port = TINYUSB_CDC_ACM_1;
-    ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
-    ESP_ERROR_CHECK(tinyusb_cdcacm_register_callback(
-        TINYUSB_CDC_ACM_1,
-        CDC_EVENT_LINE_STATE_CHANGED,
-        &tinyusb_cdc_line_state_changed_callback));
-#endif
-
-    ESP_LOGI(TAG, "USB initialization DONE");
 }
 
 // 处理响应的 Task
@@ -957,10 +579,8 @@ void handle_response_task(void *pvParameters)
         response_t response;
         if (xQueueReceive(response_queue, &response, portMAX_DELAY))
         {
-            // 发送响应数据（内部已包含最终flush）
-            usb_send_data(response.itf, response.data, response.data_len);
+            signer_transport_send(response.itf, response.data, response.data_len);
 
-            // 释放响应数据内存（零拷贝路径归还内存池；堆分配路径直接free）
             if (response.pool_buffer != NULL)
                 memory_pool_release(response.pool_buffer);
             else
@@ -971,10 +591,6 @@ void handle_response_task(void *pvParameters)
 
 void app_main(void)
 {
-    // 关闭所有日志输出
-    // esp_log_level_set("*", ESP_LOG_NONE);
-
-    // 初始化内存缓冲池
     if (!memory_pool_init())
     {
         ESP_LOGE(TAG, "Failed to initialize memory pool");
@@ -990,7 +606,6 @@ void app_main(void)
 
     initStorage();
 
-    // 创建消息队列
     message_queue = xQueueCreate(QUEUE_SIZE, sizeof(message_t));
     if (message_queue == NULL)
     {
@@ -999,7 +614,6 @@ void app_main(void)
         return;
     }
 
-    // 创建响应队列
     response_queue = xQueueCreate(QUEUE_SIZE, sizeof(response_t));
     if (response_queue == NULL)
     {
@@ -1008,19 +622,15 @@ void app_main(void)
         return;
     }
 
-    uart_config();
+    esp_err_t err = signer_transport_init(on_raw_rx_data);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to initialize signer transport: %s", esp_err_to_name(err));
+        return;
+    }
 
-    usb_config();
-
-    // 创建处理消息的 Task
     xTaskCreate(handle_message_task, "handle_message_task", TASK_STACK_SIZE, NULL, 10, NULL);
-
-    // 创建处理响应的 Task
     xTaskCreate(handle_response_task, "handle_response_task", 8192, NULL, 8, NULL);
 
-    // 注意：UART0 的引脚是固定的（GPIO20 和 GPIO21），不需要手动设置引脚
-    ESP_LOGI(TAG, "nesigner started with memory pool optimization");
-
-    // hide uart data receive function, because we use usb to receive data and sometimes this funcion will crash at macOS
-    // uart_data_receive();
+    ESP_LOGI(TAG, "nesigner started with multi-target transport support");
 }

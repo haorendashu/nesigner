@@ -1,0 +1,14 @@
+# Common configuration for nesigner across all targets
+
+# Enable secp256k1 elliptic curve in mbedTLS for Nostr signing
+CONFIG_MBEDTLS_ECP_DP_SECP256K1_ENABLED=y
+
+# Enable HKDF and ChaCha20 for Nostr NIP-44 encryption
+CONFIG_MBEDTLS_HKDF_C=y
+CONFIG_MBEDTLS_CHACHA20_C=y
+
+# Main task stack size
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# FreeRTOS tick rate
+CONFIG_FREERTOS_HZ=1000

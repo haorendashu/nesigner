@@ -4,7 +4,7 @@ A hardware ESP32 Nostr Signer.
 
 ## Overview
 
-**nesigner** is an ESP32-based application designed to sign and process Nostr messages. It leverages USB interfaces to receive, process, and respond to messages. The project is built using ESP-IDF and integrates with components like TinyUSB for USB connectivity.
+**nesigner** is an ESP32-based application designed to sign and process Nostr messages. It leverages USB and serial interfaces to receive, process, and respond to Nostr signer protocol messages. The firmware is built using ESP-IDF (>=5.3.0) and features a decoupled hardware transport abstraction layer supporting multiple ESP32 target architectures.
 
 ## You must know
 
@@ -14,62 +14,118 @@ A hardware ESP32 Nostr Signer.
 
 ## Features
 
-- Nostr Signer Basic Methods: ```getPublicKey```, ```signEvent```, ```nip04.encrypt```, ```nip04.decrypt```, ```nip44_encrypt``` and ```nip44_decrypt```.
-- The private key is only stored in the board, and all operations are performed in the board.
-- One Pin code corresponds to one private key.
-- Multiple sets of private keys can be stored.
+- **Nostr Signer Methods**: `getPublicKey`, `signEvent`, `nip04.encrypt`, `nip04.decrypt`, `nip44_encrypt`, and `nip44_decrypt`.
+- **Hardware Security**: Private keys are securely stored in on-chip NVS and never leave the device.
+- **Multi-key & PIN Support**: One PIN code corresponds to one private key; multiple keys can be safely managed.
+- **Multi-Target ESP32 Support**: First-class support for `esp32s3`, `esp32c3`, `esp32c5`, and `esp32p4`.
+- **Modular Hardware Transport HAL**: Pluggable transport backends (TinyUSB CDC-ACM, USB Serial/JTAG, and UART fallback).
+
+## Supported Targets & Transport Matrix
+
+| Target | Architecture | Default Transport | USB VID:PID | Notes |
+|---|---|---|---|---|
+| **ESP32-S3** | Xtensa Dual-core | TinyUSB CDC-ACM | `0x2323:0x3434` (Custom) | Full USB-OTG support (Default target) |
+| **ESP32-C3** | RISC-V Single-core | USB Serial/JTAG | `0x303a:0x1001` (Espressif) | Low cost; built-in USB Serial/JTAG (no OTG) |
+| **ESP32-C5** | RISC-V Single-core (2.4/5GHz Wi-Fi 6) | USB Serial/JTAG | `0x303a:0x1001` (Espressif) | Hardware lacks USB-OTG; uses native Serial/JTAG |
+| **ESP32-P4** | RISC-V Dual-core High Performance | TinyUSB CDC-ACM | `0x2323:0x3434` (Custom) | High-Speed USB 2.0 OTG |
+
+*(UART fallback transport is also available via Kconfig for custom pinouts)*
 
 ## Getting Started
 
 ### Prerequisites
 
-- ESP-IDF installed and configured.
-- Supported ESP32 board.
+- ESP-IDF v5.3.0 or later (v5.4+ recommended) installed and configured.
+- Supported ESP32 development board (ESP32-S3, ESP32-C3, ESP32-C5, or ESP32-P4).
 - Basic knowledge of embedded C programming.
 
-### Build Instructions
+### Build & Flash Instructions
 
-1. Clone the repository and init git submodule:
+1. Clone the repository and initialize submodules:
 
-```
+```bash
 git clone https://github.com/haorendashu/nesigner.git
-git submodule init;
-git submodule update;
+cd nesigner
+git submodule init
+git submodule update
 ```
 
-2. Set up the ESP-IDF environment.
+2. Set up the ESP-IDF environment:
 
-3. Config permission if necessary.
-
-**Linux**, create ```/etc/udev/rules.d/99-nesigner.rules```:
-
-```
-SUBSYSTEM=="tty", ATTR{idVendor}=="0x2323", ATTR{idProduct}=="0x3434", MODE="0666"
+```bash
+. $HOME/esp/esp-idf/export.sh
 ```
 
-or
+3. Select your target and build:
 
-```
-SUBSYSTEM=="tty", MODE="0666"
-```
+- **ESP32-S3** (Default):
+  ```bash
+  idf.py set-target esp32s3
+  idf.py build flash monitor
+  ```
 
-reload rule:
+- **ESP32-C3**:
+  ```bash
+  idf.py set-target esp32c3
+  idf.py build flash monitor
+  ```
 
-```
-sudo udevadm control --reload-rules
-```
+- **ESP32-C5** (ESP-IDF >= 5.3):
+  ```bash
+  idf.py --preview set-target esp32c5
+  idf.py build flash monitor
+  ```
 
-~~**Windows**, use [Zadig Tool](https://zadig.akeo.ie/) to install WinUSB Driver.~~
+- **ESP32-P4**:
+  ```bash
+  idf.py set-target esp32p4
+  idf.py build flash monitor
+  ```
 
+4. Customize configuration (optional):
 
-4. Configure the project:
-
-```
+```bash
 idf.py menuconfig
 ```
+Navigate to `nesigner Hardware & Transport Configuration` to choose between TinyUSB CDC-ACM, USB Serial/JTAG, or UART, and customize UART pins or buffer sizes.
 
-5. Build, flash, and monitor the project:
+### Linux Permissions (udev rules)
 
+To allow non-root access to the USB serial interfaces, create `/etc/udev/rules.d/99-nesigner.rules`:
+
+```udev
+# nesigner ESP32-S3 / ESP32-P4 (TinyUSB custom VID/PID)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2323", ATTRS{idProduct}=="3434", MODE="0666"
+
+# nesigner ESP32-C3 / ESP32-C5 (Espressif USB Serial/JTAG)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", MODE="0666"
 ```
-idf.py build flash monitor
+
+Then reload the rules:
+
+```bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger
 ```
+
+## Client SDK Compatibility Guidance
+
+Third-party client SDKs communicating with **nesigner** (such as Web Serial or Native Serial/Desktop):
+
+### 1. Web Serial SDK (e.g. `js_nesigner_sdk`)
+When requesting ports via Web Serial `navigator.serial.requestPort()`, ensure filters include both custom and native Espressif vendor/product IDs:
+
+```javascript
+const filters = [
+  // ESP32-S3 and ESP32-P4 (TinyUSB custom VID/PID)
+  { usbVendorId: 0x2323, usbProductId: 0x3434 },
+  // ESP32-C3 and ESP32-C5 (Native USB Serial/JTAG)
+  { usbVendorId: 0x303a, usbProductId: 0x1001 },
+];
+
+const port = await navigator.serial.requestPort({ filters });
+```
+
+### 2. Flutter / Desktop SDK (e.g. `flutter_nesigner_sdk`)
+- **Serial Port Mode**: Recommended across all targets (`ESP32-S3`, `ESP32-C3`, `ESP32-C5`, `ESP32-P4`). Device discovery can scan available serial ports and perform a lightweight application handshake (e.g. sending a ping or querying `getPublicKey` / status) to confirm the device is a nesigner board.
+- **Direct USB Endpoint Mode**: Compatible with targets having USB-OTG (`ESP32-S3`, `ESP32-P4`). For `ESP32-C3` and `ESP32-C5`, use standard serial port transport.
