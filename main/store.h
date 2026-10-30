@@ -1,39 +1,27 @@
 #ifndef STORE_H
 #define STORE_H
 
-// 固定长度定义（包含null终止符）
-#define AES_KEY_LEN 16     // 16字符
-#define PRIVATE_KEY_LEN 32 // 32字节
-#define PUBKEY_LEN 32      // 32字节
+#include "signer_storage.h"
 
-// 存储结构体（紧凑二进制格式）
-#pragma pack(push, 1)
-typedef struct
-{
-    uint8_t aesKey[AES_KEY_LEN];
-    uint8_t privateKey[PRIVATE_KEY_LEN];
-} StoredKeyPair;
-#pragma pack(pop)
+// Forwarding wrappers for backwards compatibility
+static inline bool loadAllKeyPairs(void) {
+    return signer_storage_load_all();
+}
 
-// 内存结构体
-typedef struct
-{
-    uint8_t aesKey[AES_KEY_LEN];
-    uint8_t privateKey[PRIVATE_KEY_LEN];
-    uint8_t pubkey[PUBKEY_LEN]; // 运行时计算
-} KeyPair;
+static inline bool addAndSaveKeyPair(const KeyPair *pair) {
+    return signer_storage_add(pair);
+}
 
-extern KeyPair *keypairs;
-extern size_t keypair_count;
+static inline bool removeAndSaveKeyPair(const uint8_t *aesKey) {
+    return signer_storage_remove(aesKey);
+}
 
-bool loadAllKeyPairs();
+static inline KeyPair *findKeyPairByPubkey(const uint8_t *pubkey) {
+    return signer_storage_find_by_pubkey(pubkey);
+}
 
-bool addAndSaveKeyPair(const KeyPair *pair);
+static inline void initStorage(void) {
+    signer_storage_init();
+}
 
-bool removeAndSaveKeyPair(const uint8_t *aesKey);
-
-KeyPair *findKeyPairByPubkey(const uint8_t *pubkey);
-
-void initStorage();
-
-#endif
+#endif // STORE_H

@@ -4,6 +4,16 @@ set(COMPONENT_SRCS
     "nesigner.c"
     "store.c"
     "nostr.c"
+    "protocol/packet_codec.c"
+    "protocol/session_crypto.c"
+    "protocol/command_router.c"
+    "crypto/crypto_secp256k1.c"
+    "crypto/crypto_mbedtls.c"
+    "nostr/nostr_ecdh_cache.c"
+    "nostr/nostr_nip01.c"
+    "nostr/nostr_nip04.c"
+    "nostr/nostr_nip44.c"
+    "storage/storage_nvs.c"
     "transport/signer_transport.c"
 )
 
@@ -21,6 +31,6 @@ endif()
 
 idf_component_register(
     SRCS ${COMPONENT_SRCS}
-    INCLUDE_DIRS "." "transport"
-    REQUIRES mbedtls cJSON driver esp_timer nvs_flash
+    INCLUDE_DIRS "." "transport" "crypto" "nostr" "storage" "protocol"
+    REQUIRES mbedtls cJSON driver esp_timer nvs_flash secp256k1
 )

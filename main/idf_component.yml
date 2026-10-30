@@ -4,6 +4,10 @@ dependencies:
   idf:
     version: '>=5.3.0'
 
+  ## High-performance secp256k1 cryptographic engine
+  secp256k1:
+    path: "../components/secp256k1"
+
   ## TinyUSB is only supported and required on targets with USB-OTG hardware
   espressif/esp_tinyusb:
     version: '^1.7.2'

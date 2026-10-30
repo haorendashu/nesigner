@@ -3,83 +3,71 @@
 
 #include <stdio.h>
 #include <string.h>
-#include "mbedtls/ecp.h"
-#include "mbedtls/bignum.h"
-#include "mbedtls/ctr_drbg.h"
-#include "mbedtls/entropy.h"
-#include "mbedtls/sha256.h"
-#include "mbedtls/chachapoly.h"
-#include "mbedtls/hkdf.h"
-#include "mbedtls/base64.h"
+#include <stdint.h>
 #include "cJSON.h"
+#include "signer_crypto.h"
+#include "nostr_nip01.h"
+#include "nostr_nip04.h"
+#include "nostr_nip44.h"
+#include "nostr_ecdh_cache.h"
+#include "utils.h"
 
-#define NOSTR_EVENT_ID_BIN_LEN 32
-#define NOSTR_EVENT_ID_HEX_LEN 64
-#define NOSTR_EVENT_SIG_BIN_LEN 64
-#define NOSTR_EVENT_SIG_HEX_LEN 128
-
-// 将16进制字符串转换为二进制
-int hex_to_bin(const char *hex, uint8_t *bin, size_t bin_size);
-
-// 将二进制转换为16进制字符串
-void bin_to_hex(const uint8_t *bin, size_t bin_size, char *hex);
-
-// 生成私钥
-int gen_private_key(uint8_t private_key_bin[32]);
-
-// 核心逻辑：私钥生成公钥
-int get_public(const uint8_t *privkey_bin, uint8_t *pubkey_bin);
-
-// 计算 Nostr Event ID
-int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
-                 cJSON *tags, const char *content, char *event_id_hex);
-
-// 签名函数
-int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bin);
-
-// Base64 编码函数（使用mbedtls实现）
-char *base64_encode(const unsigned char *data, size_t input_length);
-
-// Base64 解码函数（使用mbedtls实现）
-unsigned char *base64_decode(const char *data, size_t input_length, size_t *output_length);
-
-// PKCS#7 填充函数（严格遵循 RFC 2315 标准）
-void pkcs7_pad(uint8_t *data, size_t data_len, size_t block_size);
-
-// PKCS#7 移除填充函数（严格验证所有填充字节）
-size_t pkcs7_unpad(uint8_t *data, size_t data_len, size_t block_size);
-
-int aes_cbc_encrypt(const uint8_t *key, size_t key_len, const uint8_t *iv,
-                    const uint8_t *input, size_t input_len,
-                    uint8_t **output);
-
-int aes_cbc_decrypt(const uint8_t *key, size_t key_len, const uint8_t *iv,
-                    const uint8_t *input, size_t input_len,
-                    uint8_t **output);
-
-int aes_encrypt_padded(const uint8_t *key, size_t key_len, const uint8_t *iv,
-                       const uint8_t *input, size_t input_len,
-                       uint8_t **output, size_t *output_len);
-
-int aes_decrypt_padded(const uint8_t *key, size_t key_len, const uint8_t *iv,
-                       const uint8_t *input, size_t input_len,
-                       uint8_t **output, size_t *output_len);
-
-// NIP04Encrypt 函数（修复内存泄漏和 IV 处理）
-int nip04_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, const char *text, char **encrypted_content);
-
-// NIP04Decrypt 函数（修复 Base64 长度和内存泄漏）
-int nip04_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin, const char *encrypted_content, char **decrypted_text);
-
-// 计算 HMAC-SHA256
-int hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len, uint8_t *output);
-
-// NIP44加密函数
-int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
-                  const char *text, char **encrypted_content);
-
-// NIP44解密函数
-int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
-                  const char *encrypted_content, char **decrypted_text);
-
+#ifdef __cplusplus
+extern "C" {
 #endif
+
+// 别名与兼容接口
+static inline int gen_private_key(uint8_t private_key_bin[32]) {
+    return crypto_secp256k1_gen_privkey(private_key_bin);
+}
+
+static inline int get_public(const uint8_t *privkey_bin, uint8_t *pubkey_bin) {
+    return crypto_secp256k1_get_public(privkey_bin, pubkey_bin);
+}
+
+static inline int gen_event_id(const char *pubkey_hex, uint32_t created_at, uint16_t kind,
+                               cJSON *tags, const char *content, char *event_id_hex) {
+    return nostr_nip01_gen_event_id(pubkey_hex, created_at, kind, tags, content, event_id_hex);
+}
+
+static inline int sign(const uint8_t *privkey_bin, const uint8_t *message_bin, uint8_t *sig_bin) {
+    return nostr_nip01_sign_event(privkey_bin, message_bin, sig_bin);
+}
+
+static inline int nip04_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
+                                const char *text, char **encrypted_content) {
+    return nostr_nip04_encrypt(our_privkey_bin, their_pubkey_bin, text, encrypted_content);
+}
+
+static inline int nip04_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
+                                const char *encrypted_content, char **decrypted_text) {
+    return nostr_nip04_decrypt(our_privkey_bin, their_pubkey_bin, encrypted_content, decrypted_text);
+}
+
+static inline int nip44_encrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
+                                const char *text, char **encrypted_content) {
+    return nostr_nip44_encrypt(our_privkey_bin, their_pubkey_bin, text, encrypted_content);
+}
+
+static inline int nip44_decrypt(const uint8_t *our_privkey_bin, const uint8_t *their_pubkey_bin,
+                                const char *encrypted_content, char **decrypted_text) {
+    return nostr_nip44_decrypt(our_privkey_bin, their_pubkey_bin, encrypted_content, decrypted_text);
+}
+
+static inline int aes_encrypt_padded(const uint8_t *key, size_t key_len, const uint8_t *iv,
+                                     const uint8_t *input, size_t input_len,
+                                     uint8_t **output, size_t *output_len) {
+    return crypto_aes_encrypt_padded(key, key_len, iv, input, input_len, output, output_len);
+}
+
+static inline int aes_decrypt_padded(const uint8_t *key, size_t key_len, const uint8_t *iv,
+                                     const uint8_t *input, size_t input_len,
+                                     uint8_t **output, size_t *output_len) {
+    return crypto_aes_decrypt_padded(key, key_len, iv, input, input_len, output, output_len);
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // NOSTR_H
