@@ -1,6 +1,6 @@
 ## IDF Component Manager Manifest File
 dependencies:
-  ## Required IDF version for multi-target support (ESP32-S3, C5, P4)
+  ## Required IDF version for multi-target support (ESP32-S3, C3, C5, C6, S2, P4)
   idf:
     version: '>=5.3.0'
 
