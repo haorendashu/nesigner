@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "signer_transport.h"
@@ -46,10 +47,18 @@ static esp_err_t transport_usb_serial_jtag_send(uint8_t itf, const uint8_t *data
     size_t total_sent = 0;
     const uint8_t *data_ptr = data;
     size_t remaining = len;
+    uint32_t start_time = esp_timer_get_time() / 1000;
+    const uint32_t timeout_ms = 3000;
 
     while (remaining > 0)
     {
-        int sent = usb_serial_jtag_write_bytes(data_ptr, remaining, pdMS_TO_TICKS(1000));
+        if (!usb_serial_jtag_is_connected())
+        {
+            ESP_LOGW(TAG, "USB Serial/JTAG not connected to host");
+            return ESP_ERR_NOT_FOUND;
+        }
+
+        int sent = usb_serial_jtag_write_bytes(data_ptr, remaining, pdMS_TO_TICKS(500));
         if (sent < 0)
         {
             ESP_LOGE(TAG, "USB Serial/JTAG write error");
@@ -57,7 +66,12 @@ static esp_err_t transport_usb_serial_jtag_send(uint8_t itf, const uint8_t *data
         }
         else if (sent == 0)
         {
-            vTaskDelay(pdMS_TO_TICKS(1));
+            if ((esp_timer_get_time() / 1000 - start_time) >= timeout_ms)
+            {
+                ESP_LOGE(TAG, "USB Serial/JTAG write timeout (%zu/%zu sent)", total_sent, len);
+                return ESP_ERR_TIMEOUT;
+            }
+            vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
         total_sent += sent;

@@ -30,8 +30,8 @@ static uint64_t s_start_read_time = 0;
 static void on_raw_rx_data(uint8_t itf, const uint8_t *data, size_t rx_size)
 {
     uint64_t current_time = esp_timer_get_time() / 1000;
-    if (s_start_read_time > 0 && (current_time - s_start_read_time) >= READ_TIMEOUT_MS) {
-        ESP_LOGE(TAG, "Transport read timeout");
+    if (s_start_read_time > 0 && (current_time - s_start_read_time) >= 2000) {
+        ESP_LOGW(TAG, "Transport read timeout, resetting rx buffer (%zu bytes discarded)", s_proto_msg_buffer_size);
         s_proto_msg_buffer_size = 0;
         s_start_read_time = 0;
     }
@@ -51,60 +51,48 @@ static void on_raw_rx_data(uint8_t itf, const uint8_t *data, size_t rx_size)
     s_proto_msg_buffer_size += rx_size;
 
     while (s_proto_msg_buffer_size >= REQUEST_HEAD_LEN) {
-        size_t offset = 0;
+        // Fast header check: message type high byte must be 0, low byte <= 20
+        uint16_t msg_type = ((uint16_t)s_proto_msg_buffer[0] << 8) | s_proto_msg_buffer[1];
+        if (s_proto_msg_buffer[0] != 0 || s_proto_msg_buffer[1] > 20) {
+            memmove(s_proto_msg_buffer, s_proto_msg_buffer + 1, --s_proto_msg_buffer_size);
+            continue;
+        }
 
-        uint8_t type[TYPE_SIZE];
-        memcpy(type, s_proto_msg_buffer + offset, TYPE_SIZE);
-        offset += TYPE_SIZE;
+        // Header length offset: TYPE(2) + ID(16) + PUBKEY(32) + IV(16) = 66
+        uint32_t data_len = ((uint32_t)s_proto_msg_buffer[66] << 24) |
+                            ((uint32_t)s_proto_msg_buffer[67] << 16) |
+                            ((uint32_t)s_proto_msg_buffer[68] << 8)  |
+                            (uint32_t)s_proto_msg_buffer[69];
 
-        uint8_t id[ID_SIZE];
-        memcpy(id, s_proto_msg_buffer + offset, ID_SIZE);
-        offset += ID_SIZE;
-
-        uint8_t pubkey[PUBKEY_SIZE];
-        memcpy(pubkey, s_proto_msg_buffer + offset, PUBKEY_SIZE);
-        offset += PUBKEY_SIZE;
-
-        uint8_t iv[IV_SIZE];
-        memcpy(iv, s_proto_msg_buffer + offset, IV_SIZE);
-        offset += IV_SIZE;
-
-        uint8_t header[HEADER_SIZE];
-        memcpy(header, s_proto_msg_buffer + offset, HEADER_SIZE);
-        offset += HEADER_SIZE;
-
-        uint32_t data_len = ((uint32_t)header[0] << 24) |
-                            ((uint32_t)header[1] << 16) |
-                            ((uint32_t)header[2] << 8)  |
-                            (uint32_t)header[3];
+        // Sanity check data_len against max allowable buffer space
+        if (data_len > (PROTOCOL_BUFFER_SIZE - REQUEST_HEAD_LEN - CRC_SIZE)) {
+            memmove(s_proto_msg_buffer, s_proto_msg_buffer + 1, --s_proto_msg_buffer_size);
+            continue;
+        }
 
         size_t whole_msg_len = REQUEST_HEAD_LEN + data_len + CRC_SIZE;
         if (s_proto_msg_buffer_size < whole_msg_len) {
             return;
         }
 
-        uint8_t crc[CRC_SIZE];
-        memcpy(crc, s_proto_msg_buffer + REQUEST_HEAD_LEN + data_len, CRC_SIZE);
-
-        uint16_t received_crc = (crc[0] << 8) | crc[1];
+        uint16_t received_crc = ((uint16_t)s_proto_msg_buffer[REQUEST_HEAD_LEN + data_len] << 8) |
+                                s_proto_msg_buffer[REQUEST_HEAD_LEN + data_len + 1];
         uint16_t computed_crc = crc16(s_proto_msg_buffer, REQUEST_HEAD_LEN + data_len);
         if (computed_crc != received_crc) {
-            ESP_LOGE(TAG, "CRC check failed");
-            s_proto_msg_buffer_size -= whole_msg_len;
-            memmove(s_proto_msg_buffer, s_proto_msg_buffer + whole_msg_len, s_proto_msg_buffer_size);
-            s_start_read_time = 0;
-            return;
+            ESP_LOGW(TAG, "CRC check failed (rec=0x%04x, calc=0x%04x), sliding 1 byte", received_crc, computed_crc);
+            memmove(s_proto_msg_buffer, s_proto_msg_buffer + 1, --s_proto_msg_buffer_size);
+            continue;
         }
 
         message_t message = {
             .itf = itf,
-            .message_type = (uint16_t)((type[0] << 8) | type[1]),
+            .message_type = msg_type,
             .message_len = data_len,
             .message = NULL
         };
-        memcpy(message.message_id, id, ID_SIZE);
-        memcpy(message.pubkey, pubkey, PUBKEY_SIZE);
-        memcpy(message.iv, iv, IV_SIZE);
+        memcpy(message.message_id, s_proto_msg_buffer + 2, ID_SIZE);
+        memcpy(message.pubkey, s_proto_msg_buffer + 18, PUBKEY_SIZE);
+        memcpy(message.iv, s_proto_msg_buffer + 50, IV_SIZE);
 
         if (data_len > 0) {
             message.message = (uint8_t *)malloc(data_len);
