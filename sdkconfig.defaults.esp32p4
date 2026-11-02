@@ -1,5 +1,11 @@
-# ESP32-P4 Target Configuration
+# ESP32-P4 Target Configuration (Production silicon Rev >= 3.0, 400MHz)
 CONFIG_IDF_TARGET="esp32p4"
+
+# Production silicon defaults (Rev >= 3.0, 400MHz)
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=n
+CONFIG_ESP32P4_REV_MIN_301=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=400
 
 # Transport selection: TinyUSB (USB 2.0 High Speed OTG)
 CONFIG_SIGNER_TRANSPORT_TINYUSB=y

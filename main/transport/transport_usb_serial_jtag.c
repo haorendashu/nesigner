@@ -14,8 +14,8 @@
 
 static const char *TAG = "TRANSPORT_USJ";
 
-#define USJ_RX_BUF_SIZE 512
-#define USJ_TX_BUF_SIZE 512
+#define USJ_RX_BUF_SIZE 1024
+#define USJ_TX_BUF_SIZE 2048
 
 static signer_rx_callback_t s_rx_callback = NULL;
 static TaskHandle_t s_rx_task_handle = NULL;
@@ -52,12 +52,6 @@ static esp_err_t transport_usb_serial_jtag_send(uint8_t itf, const uint8_t *data
 
     while (remaining > 0)
     {
-        if (!usb_serial_jtag_is_connected())
-        {
-            ESP_LOGW(TAG, "USB Serial/JTAG not connected to host");
-            return ESP_ERR_NOT_FOUND;
-        }
-
         int sent = usb_serial_jtag_write_bytes(data_ptr, remaining, pdMS_TO_TICKS(500));
         if (sent < 0)
         {
@@ -78,6 +72,9 @@ static esp_err_t transport_usb_serial_jtag_send(uint8_t itf, const uint8_t *data
         data_ptr += sent;
         remaining -= sent;
     }
+
+    // Flush TX FIFO to host
+    usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(500));
     return ESP_OK;
 }
 

@@ -38,6 +38,18 @@ void nostr_ecdh_cache_clear(void)
     }
 }
 
+static void canonicalize_pubkeys(const uint8_t pub1[32], const uint8_t pub2[32],
+                                const uint8_t **first, const uint8_t **second)
+{
+    if (memcmp(pub1, pub2, 32) <= 0) {
+        *first = pub1;
+        *second = pub2;
+    } else {
+        *first = pub2;
+        *second = pub1;
+    }
+}
+
 bool nostr_ecdh_cache_get(const uint8_t our_pubkey[32],
                           const uint8_t their_pubkey[32],
                           uint8_t shared_secret[32])
@@ -48,12 +60,15 @@ bool nostr_ecdh_cache_get(const uint8_t our_pubkey[32],
         nostr_ecdh_cache_init();
     }
 
+    const uint8_t *k1 = NULL, *k2 = NULL;
+    canonicalize_pubkeys(our_pubkey, their_pubkey, &k1, &k2);
+
     bool hit = false;
     if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
         for (size_t i = 0; i < NOSTR_ECDH_CACHE_CAPACITY; i++) {
             if (s_cache[i].valid &&
-                memcmp(s_cache[i].our_pubkey, our_pubkey, 32) == 0 &&
-                memcmp(s_cache[i].their_pubkey, their_pubkey, 32) == 0) {
+                memcmp(s_cache[i].our_pubkey, k1, 32) == 0 &&
+                memcmp(s_cache[i].their_pubkey, k2, 32) == 0) {
                 memcpy(shared_secret, s_cache[i].shared_secret, 32);
                 s_cache[i].access_tick = ++s_access_counter;
                 hit = true;
@@ -79,6 +94,9 @@ void nostr_ecdh_cache_put(const uint8_t our_pubkey[32],
         nostr_ecdh_cache_init();
     }
 
+    const uint8_t *k1 = NULL, *k2 = NULL;
+    canonicalize_pubkeys(our_pubkey, their_pubkey, &k1, &k2);
+
     if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
         size_t target_idx = 0;
         uint32_t min_tick = UINT32_MAX;
@@ -87,8 +105,8 @@ void nostr_ecdh_cache_put(const uint8_t our_pubkey[32],
         // 1. Search for existing entry to update, or first empty slot
         for (size_t i = 0; i < NOSTR_ECDH_CACHE_CAPACITY; i++) {
             if (s_cache[i].valid &&
-                memcmp(s_cache[i].our_pubkey, our_pubkey, 32) == 0 &&
-                memcmp(s_cache[i].their_pubkey, their_pubkey, 32) == 0) {
+                memcmp(s_cache[i].our_pubkey, k1, 32) == 0 &&
+                memcmp(s_cache[i].their_pubkey, k2, 32) == 0) {
                 target_idx = i;
                 found_slot = true;
                 break;
@@ -106,8 +124,8 @@ void nostr_ecdh_cache_put(const uint8_t our_pubkey[32],
         }
 
         // If all valid and no existing match, target_idx holds least recently used
-        memcpy(s_cache[target_idx].our_pubkey, our_pubkey, 32);
-        memcpy(s_cache[target_idx].their_pubkey, their_pubkey, 32);
+        memcpy(s_cache[target_idx].our_pubkey, k1, 32);
+        memcpy(s_cache[target_idx].their_pubkey, k2, 32);
         memcpy(s_cache[target_idx].shared_secret, shared_secret, 32);
         s_cache[target_idx].access_tick = ++s_access_counter;
         s_cache[target_idx].valid = true;

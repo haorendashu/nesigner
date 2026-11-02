@@ -170,6 +170,12 @@ int crypto_chacha20_poly1305_decrypt(const uint8_t key[32], const uint8_t nonce[
                                      const uint8_t *ciphertext, size_t ciphertext_len,
                                      const uint8_t tag[16], uint8_t *plaintext);
 
+/**
+ * @brief ChaCha20 stream cipher encryption/decryption (RFC 7539 / 8439)
+ */
+int crypto_chacha20_stream(const uint8_t key[32], const uint8_t nonce[12],
+                           const uint8_t *input, size_t len, uint8_t *output);
+
 /* Base64 Utilities */
 char *crypto_base64_encode(const unsigned char *data, size_t input_length);
 unsigned char *crypto_base64_decode(const char *data, size_t input_length, size_t *output_length);

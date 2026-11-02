@@ -7,6 +7,14 @@ CONFIG_SIGNER_TRANSPORT_USB_SERIAL_JTAG=y
 # Disable secondary console on USB Serial/JTAG so it does not conflict with data transport
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
+# Silence 2nd stage bootloader logs to keep USB transport clean
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL=0
+
+# Flash configuration for ESP32-C5 (4MB embedded flash, ROM flasher)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_NO_STUB=y
+
 # UART fallback configuration (C5 has UART0 and UART1)
 CONFIG_SIGNER_UART_PORT_NUM=1
 CONFIG_SIGNER_UART_TX_PIN=11

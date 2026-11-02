@@ -48,14 +48,16 @@ void command_router_dispatch(const message_t *msg)
     // 4. UPDATE_KEY (add new keypair encrypted with temp_private_key)
     if (msg->message_type == MSG_TYPE_UPDATE_KEY) {
         if (msg->message_len < PRIVATE_KEY_LEN + AES_KEY_LEN) {
-            send_response(msg->itf, MSG_RESULT_CONTENT_ILLEGAL, msg->message_type, msg->message_id, msg->pubkey, msg->iv, NULL, 0);
+            const char *err = "Payload too short";
+            send_response(msg->itf, MSG_RESULT_CONTENT_ILLEGAL, msg->message_type, msg->message_id, msg->pubkey, msg->iv, (const uint8_t *)err, strlen(err));
             return;
         }
 
         char *decrypted_content = NULL;
         char *encrypted_content = (char *)malloc(msg->message_len + 1);
         if (!encrypted_content) {
-            send_response(msg->itf, MSG_RESULT_KEY_NOT_FOUND, msg->message_type, msg->message_id, msg->pubkey, msg->iv, NULL, 0);
+            const char *err = "Out of memory";
+            send_response(msg->itf, MSG_RESULT_KEY_NOT_FOUND, msg->message_type, msg->message_id, msg->pubkey, msg->iv, (const uint8_t *)err, strlen(err));
             return;
         }
         memcpy(encrypted_content, msg->message, msg->message_len);
@@ -63,10 +65,18 @@ void command_router_dispatch(const message_t *msg)
 
         if (nostr_nip44_decrypt(temp_private_key, msg->pubkey, encrypted_content, &decrypted_content) != 0) {
             free(encrypted_content);
-            send_response(msg->itf, MSG_RESULT_CONTENT_ILLEGAL, msg->message_type, msg->message_id, msg->pubkey, msg->iv, NULL, 0);
+            const char *err = "NIP-44 decrypt failed (HMAC/Base64)";
+            send_response(msg->itf, MSG_RESULT_CONTENT_ILLEGAL, msg->message_type, msg->message_id, msg->pubkey, msg->iv, (const uint8_t *)err, strlen(err));
             return;
         }
         free(encrypted_content);
+
+        if (!decrypted_content || strlen(decrypted_content) < PRIVATE_KEY_LEN * 2 + AES_KEY_LEN * 2) {
+            if (decrypted_content) free(decrypted_content);
+            const char *err = "Decrypted content too short (<96 hex chars)";
+            send_response(msg->itf, MSG_RESULT_CONTENT_ILLEGAL, msg->message_type, msg->message_id, msg->pubkey, msg->iv, (const uint8_t *)err, strlen(err));
+            return;
+        }
 
         char private_key_hex[PRIVATE_KEY_LEN * 2 + 1];
         char aes_key_hex[AES_KEY_LEN * 2 + 1];
@@ -80,14 +90,16 @@ void command_router_dispatch(const message_t *msg)
         KeyPair kp;
         if (hex_to_bin(private_key_hex, kp.privateKey, PRIVATE_KEY_LEN) != 0 ||
             hex_to_bin(aes_key_hex, kp.aesKey, AES_KEY_LEN) != 0) {
-            send_response(msg->itf, MSG_RESULT_CONTENT_ILLEGAL, msg->message_type, msg->message_id, msg->pubkey, msg->iv, NULL, 0);
+            const char *err = "Invalid hex in decrypted key";
+            send_response(msg->itf, MSG_RESULT_CONTENT_ILLEGAL, msg->message_type, msg->message_id, msg->pubkey, msg->iv, (const uint8_t *)err, strlen(err));
             return;
         }
 
         if (signer_storage_add(&kp)) {
             send_response(msg->itf, MSG_RESULT_OK, msg->message_type, msg->message_id, msg->pubkey, msg->iv, NULL, 0);
         } else {
-            send_response(msg->itf, MSG_RESULT_KEY_NOT_FOUND, msg->message_type, msg->message_id, msg->pubkey, msg->iv, NULL, 0);
+            const char *err = "Failed to save keypair to NVS";
+            send_response(msg->itf, MSG_RESULT_KEY_NOT_FOUND, msg->message_type, msg->message_id, msg->pubkey, msg->iv, (const uint8_t *)err, strlen(err));
         }
         return;
     }

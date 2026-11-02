@@ -1,7 +1,6 @@
 #include "nostr_nip44.h"
 #include "nostr_ecdh_cache.h"
 #include "signer_crypto.h"
-#include "mbedtls/chacha20.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
@@ -135,16 +134,7 @@ int nostr_nip44_encrypt(const uint8_t *our_privkey, const uint8_t *their_pubkey,
     memcpy(payload + 1, nonce, 32);
 
     // ChaCha20 encryption directly into payload + 33
-    mbedtls_chacha20_context ctx;
-    mbedtls_chacha20_init(&ctx);
-    int ret = -1;
-
-    if (mbedtls_chacha20_setkey(&ctx, chacha_key) == 0 &&
-        mbedtls_chacha20_starts(&ctx, chacha_nonce, 0) == 0 &&
-        mbedtls_chacha20_update(&ctx, padded_len, padded_text, payload + 33) == 0) {
-        ret = 0;
-    }
-    mbedtls_chacha20_free(&ctx);
+    int ret = crypto_chacha20_stream(chacha_key, chacha_nonce, padded_text, padded_len, payload + 33);
     free(padded_text);
 
     if (ret != 0) {
@@ -226,16 +216,7 @@ int nostr_nip44_decrypt(const uint8_t *our_privkey, const uint8_t *their_pubkey,
         return -1;
     }
 
-    mbedtls_chacha20_context ctx;
-    mbedtls_chacha20_init(&ctx);
-    int ret = -1;
-
-    if (mbedtls_chacha20_setkey(&ctx, chacha_key) == 0 &&
-        mbedtls_chacha20_starts(&ctx, chacha_nonce, 0) == 0 &&
-        mbedtls_chacha20_update(&ctx, cipher_len, ciphertext, padded_text) == 0) {
-        ret = 0;
-    }
-    mbedtls_chacha20_free(&ctx);
+    int ret = crypto_chacha20_stream(chacha_key, chacha_nonce, ciphertext, cipher_len, padded_text);
     free(payload);
 
     if (ret != 0) {

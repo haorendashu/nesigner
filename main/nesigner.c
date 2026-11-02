@@ -10,6 +10,7 @@
 #include "session_crypto.h"
 #include "command_router.h"
 #include "signer_crypto.h"
+#include "psa/crypto.h"
 #include "nostr_ecdh_cache.h"
 #include "nostr_nip44.h"
 #include "signer_storage.h"
@@ -205,6 +206,12 @@ void app_main(void)
 
     if (!memory_pool_init()) {
         ESP_LOGE(TAG, "Failed to initialize memory pool");
+        return;
+    }
+
+    psa_status_t psa_status = psa_crypto_init();
+    if (psa_status != PSA_SUCCESS) {
+        ESP_LOGE(TAG, "Failed to initialize PSA crypto subsystem: %d", (int)psa_status);
         return;
     }
 

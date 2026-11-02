@@ -7,30 +7,30 @@ Defines build system and runtime configurations supporting seamless targeting of
 ## Requirements
 
 ### Requirement: Modular Target Configuration Defaults
-The build system SHALL maintain shared default configuration parameters in `sdkconfig.defaults` and target-specific overrides in dedicated target defaults files for ESP32-S3, ESP32-C3, ESP32-C5, ESP32-C6, ESP32-S2, and ESP32-P4.
+The build system SHALL maintain shared default configuration parameters in `sdkconfig.defaults` and target-specific overrides in dedicated target defaults files for ESP32-S3, ESP32-C3, ESP32-C5, ESP32-C6, ESP32-S2, and ESP32-P4, compatible with ESP-IDF v6.1+ toolchains and silicon revisions.
 
 #### Scenario: Building for ESP32-S3
-- **WHEN** building firmware with target set to `esp32s3`
+- **WHEN** building firmware with target set to `esp32s3` under ESP-IDF v6.1+
 - **THEN** the build system applies `sdkconfig.defaults` and `sdkconfig.defaults.esp32s3`, enabling secp256k1 and TinyUSB support
 
 #### Scenario: Building for ESP32-C3
-- **WHEN** building firmware with target set to `esp32c3`
+- **WHEN** building firmware with target set to `esp32c3` under ESP-IDF v6.1+
 - **THEN** the build system applies `sdkconfig.defaults` and `sdkconfig.defaults.esp32c3`, enabling USB Serial/JTAG and single-core FreeRTOS settings
 
 #### Scenario: Building for ESP32-C5
-- **WHEN** building firmware with target set to `esp32c5`
-- **THEN** the build system applies `sdkconfig.defaults` and `sdkconfig.defaults.esp32c5`, enabling USB Serial/JTAG and single-core FreeRTOS settings
+- **WHEN** building firmware with target set to `esp32c5` for production silicon (Revision v1.0~v1.99) under ESP-IDF v6.1+
+- **THEN** the build system applies `sdkconfig.defaults` and `sdkconfig.defaults.esp32c5`, creating bootloader and application binaries compatible with Revision v1.2 hardware without revision mismatch errors
 
 #### Scenario: Building for ESP32-C6
-- **WHEN** building firmware with target set to `esp32c6`
+- **WHEN** building firmware with target set to `esp32c6` under ESP-IDF v6.1+
 - **THEN** the build system applies `sdkconfig.defaults` and `sdkconfig.defaults.esp32c6`, enabling USB Serial/JTAG and single-core FreeRTOS settings
 
 #### Scenario: Building for ESP32-S2
-- **WHEN** building firmware with target set to `esp32s2`
+- **WHEN** building firmware with target set to `esp32s2` under ESP-IDF v6.1+
 - **THEN** the build system applies `sdkconfig.defaults` and `sdkconfig.defaults.esp32s2`, enabling TinyUSB support on CPU0 and single-core FreeRTOS settings
 
 #### Scenario: Building for ESP32-P4
-- **WHEN** building firmware with target set to `esp32p4`
+- **WHEN** building firmware with target set to `esp32p4` under ESP-IDF v6.1+
 - **THEN** the build system applies `sdkconfig.defaults` and `sdkconfig.defaults.esp32p4`, configuring high-performance RISC-V clocking and high-speed USB settings
 
 ### Requirement: Single-Core and Dual-Core Runtime Compatibility
@@ -45,12 +45,12 @@ The runtime task creation SHALL dynamically adapt to the target processor core c
 - **THEN** crypto processing and communication tasks are scheduled across available cores
 
 ### Requirement: Conditional Component Dependency
-The component manager manifest and CMake build configuration SHALL omit `esp_tinyusb` when building for targets that lack USB-OTG hardware support.
+The component manager manifest and CMake build configuration SHALL require `espressif/cjson` across all targets while omitting `esp_tinyusb` when building for targets that lack USB-OTG hardware support.
 
 #### Scenario: Component dependency resolution on non-OTG target
-- **WHEN** resolving dependencies for `esp32c5` or `esp32c6`
-- **THEN** the build system does not require or compile the `esp_tinyusb` component, completing build configuration cleanly
+- **WHEN** resolving dependencies for `esp32c5` or `esp32c6` under ESP-IDF v6.1+
+- **THEN** the build system resolves `espressif/cjson` from the registry and omits the `esp_tinyusb` component, completing build configuration cleanly
 
 #### Scenario: Component dependency resolution on OTG target
-- **WHEN** resolving dependencies for `esp32s2`, `esp32s3`, or `esp32p4`
-- **THEN** the `esp_tinyusb` component is fetched and linked into the firmware binary
+- **WHEN** resolving dependencies for `esp32s2`, `esp32s3`, or `esp32p4` under ESP-IDF v6.1+
+- **THEN** the `espressif/cjson` and `esp_tinyusb` components are fetched and linked into the firmware binary
