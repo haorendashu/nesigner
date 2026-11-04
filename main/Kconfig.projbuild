@@ -9,7 +9,7 @@ menu "nesigner Configuration"
             Select the primary communication transport backend for nesigner.
 
         config SIGNER_TRANSPORT_TINYUSB
-            bool "USB-OTG TinyUSB CDC-ACM (ESP32-S3, ESP32-S2, ESP32-P4)"
+            bool "USB-OTG TinyUSB CDC-ACM (ESP32-S3, ESP32-S2, ESP32-P4, ESP32-S31)"
             depends on SOC_USB_OTG_SUPPORTED
             select TINYUSB_CDC_ENABLED
             help
@@ -32,14 +32,14 @@ menu "nesigner Configuration"
         config SIGNER_UART_PORT_NUM
             int "UART Port Number"
             default 1 if IDF_TARGET_ESP32C5 || IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32C6 || IDF_TARGET_ESP32S2
-            default 2 if IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4
+            default 2 if IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4 || IDF_TARGET_ESP32S31
             default 0
             help
                 UART port number to use.
 
         config SIGNER_UART_TX_PIN
             int "UART TX GPIO Pin"
-            default 4 if IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32C6
+            default 4 if IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32C6 || IDF_TARGET_ESP32S31
             default 17 if IDF_TARGET_ESP32S2
             default 11 if IDF_TARGET_ESP32C5
             default 14 if IDF_TARGET_ESP32P4
@@ -49,7 +49,7 @@ menu "nesigner Configuration"
 
         config SIGNER_UART_RX_PIN
             int "UART RX GPIO Pin"
-            default 5 if IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32C6
+            default 5 if IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32C6 || IDF_TARGET_ESP32S31
             default 18 if IDF_TARGET_ESP32S2
             default 12 if IDF_TARGET_ESP32C5
             default 15 if IDF_TARGET_ESP32P4

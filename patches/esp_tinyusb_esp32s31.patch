@@ -1,0 +1,19 @@
+--- a/managed_components/espressif__esp_tinyusb/Kconfig
++++ b/managed_components/espressif__esp_tinyusb/Kconfig
+@@ -11,3 +11,3 @@
+-        default TINYUSB_RHPORT_HS if IDF_TARGET_ESP32P4
++        default TINYUSB_RHPORT_HS if IDF_TARGET_ESP32P4 || IDF_TARGET_ESP32S31
+         default TINYUSB_RHPORT_FS
+@@ -21,1 +21,1 @@
+-            depends on IDF_TARGET_ESP32P4
++            depends on IDF_TARGET_ESP32P4 || IDF_TARGET_ESP32S31
+--- a/managed_components/espressif__esp_tinyusb/include/tusb_config.h
++++ b/managed_components/espressif__esp_tinyusb/include/tusb_config.h
+@@ -87,4 +87,8 @@
++#if CONFIG_IDF_TARGET_ESP32S31
++#   define CFG_TUSB_RHPORT0_MODE    OPT_MODE_DEVICE | OPT_MODE_HIGH_SPEED
++#elif defined(CONFIG_TINYUSB_RHPORT_HS)
+ #   define CFG_TUSB_RHPORT1_MODE    OPT_MODE_DEVICE | OPT_MODE_HIGH_SPEED
+ #else
+ #   define CFG_TUSB_RHPORT0_MODE    OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED
+ #endif

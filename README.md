@@ -17,7 +17,7 @@ A hardware ESP32 Nostr Signer.
 - **Nostr Signer Methods**: `getPublicKey`, `signEvent`, `nip04.encrypt`, `nip04.decrypt`, `nip44_encrypt`, and `nip44_decrypt`.
 - **Hardware Security**: Private keys are securely stored in on-chip NVS and never leave the device.
 - **Multi-key & PIN Support**: One PIN code corresponds to one private key; multiple keys can be safely managed.
-- **Multi-Target ESP32 Support**: First-class support for `esp32s3`, `esp32s2`, `esp32c3`, `esp32c5`, `esp32c6`, and `esp32p4`.
+- **Multi-Target ESP32 Support**: First-class support for `esp32s3`, `esp32s2`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32p4`, and `esp32s31`.
 - **Modular Hardware Transport HAL**: Pluggable transport backends (TinyUSB CDC-ACM, USB Serial/JTAG, and UART fallback).
 
 ## Supported Targets & Transport Matrix
@@ -30,6 +30,7 @@ A hardware ESP32 Nostr Signer.
 | **ESP32-C5** | RISC-V Single-core (2.4/5GHz Wi-Fi 6) | USB Serial/JTAG | `0x303a:0x1001` (Espressif) | Hardware lacks USB-OTG; uses native Serial/JTAG |
 | **ESP32-C6** | RISC-V Single-core (Wi-Fi 6 / 802.15.4) | USB Serial/JTAG | `0x303a:0x1001` (Espressif) | Built-in USB Serial/JTAG controller |
 | **ESP32-P4** | RISC-V Dual-core High Performance | TinyUSB CDC-ACM | `0x2323:0x3434` (Custom) | High-Speed USB 2.0 OTG |
+| **ESP32-S31** | RISC-V Dual-core High Performance (320MHz) | TinyUSB CDC-ACM | `0x2323:0x3434` (Custom) | High-Speed USB 2.0 OTG (UTMI PHY) |
 
 *(UART fallback transport is also available via Kconfig for custom pinouts)*
 
@@ -37,8 +38,8 @@ A hardware ESP32 Nostr Signer.
 
 ### Prerequisites
 
-- ESP-IDF v5.3.0 or later (v5.4+ recommended) installed and configured.
-- Supported ESP32 development board (ESP32-S3, ESP32-S2, ESP32-C3, ESP32-C5, ESP32-C6, or ESP32-P4).
+- ESP-IDF v5.3.0 or later (v6.1+ recommended for ESP32-P4 / ESP32-S31) installed and configured.
+- Supported ESP32 development board (ESP32-S3, ESP32-S2, ESP32-C3, ESP32-C5, ESP32-C6, ESP32-P4, or ESP32-S31).
 - Basic knowledge of embedded C programming.
 
 ### Build & Flash Instructions
@@ -96,6 +97,12 @@ git submodule update
   idf.py build flash monitor
   ```
 
+- **ESP32-S31** (ESP-IDF >= 6.1):
+  ```bash
+  idf.py set-target esp32s31
+  idf.py build flash monitor
+  ```
+
 4. Customize configuration (optional):
 
 ```bash
@@ -108,10 +115,10 @@ Navigate to `nesigner Hardware & Transport Configuration` to choose between Tiny
 To allow non-root access to the USB serial interfaces, create `/etc/udev/rules.d/99-nesigner.rules`:
 
 ```udev
-# nesigner ESP32-S3 / ESP32-S2 / ESP32-P4 (TinyUSB custom VID/PID)
+# nesigner ESP32-S3 / ESP32-S2 / ESP32-P4 / ESP32-S31 (TinyUSB custom VID/PID)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="2323", ATTRS{idProduct}=="3434", MODE="0666"
 
-# nesigner ESP32-C3 / ESP32-C5 / ESP32-C6 (Espressif USB Serial/JTAG)
+# nesigner ESP32-C3 / ESP32-C5 / ESP32-C6 / ESP32-S31 (Espressif USB Serial/JTAG)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", MODE="0666"
 ```
 
@@ -133,7 +140,7 @@ When requesting ports via Web Serial `navigator.serial.requestPort()`, ensure fi
 const filters = [
   // ESP32-S3, ESP32-S2, and ESP32-P4 (TinyUSB custom VID/PID)
   { usbVendorId: 0x2323, usbProductId: 0x3434 },
-  // ESP32-C3, ESP32-C5, and ESP32-C6 (Native USB Serial/JTAG)
+  // ESP32-C3, ESP32-C5, ESP32-C6, and ESP32-S31 (Native USB Serial/JTAG)
   { usbVendorId: 0x303a, usbProductId: 0x1001 },
 ];
 
@@ -141,5 +148,5 @@ const port = await navigator.serial.requestPort({ filters });
 ```
 
 ### 2. Flutter / Desktop SDK (e.g. `flutter_nesigner_sdk`)
-- **Serial Port Mode**: Recommended across all targets (`ESP32-S3`, `ESP32-S2`, `ESP32-C3`, `ESP32-C5`, `ESP32-C6`, `ESP32-P4`). Device discovery can scan available serial ports and perform a lightweight application handshake (e.g. sending a ping or querying `getPublicKey` / status) to confirm the device is a nesigner board.
-- **Direct USB Endpoint Mode**: Compatible with targets having USB-OTG (`ESP32-S3`, `ESP32-S2`, `ESP32-P4`). For `ESP32-C3`, `ESP32-C5`, and `ESP32-C6`, use standard serial port transport.
+- **Serial Port Mode**: Recommended across all targets (`ESP32-S3`, `ESP32-S2`, `ESP32-C3`, `ESP32-C5`, `ESP32-C6`, `ESP32-P4`, `ESP32-S31`). Device discovery can scan available serial ports and perform a lightweight application handshake (e.g. sending a ping or querying `getPublicKey` / status) to confirm the device is a nesigner board.
+- **Direct USB Endpoint Mode**: Compatible with targets having USB-OTG (`ESP32-S3`, `ESP32-S2`, `ESP32-P4`, `ESP32-S31`). For `ESP32-C3`, `ESP32-C5`, and `ESP32-C6`, use standard serial port transport.

@@ -1,6 +1,6 @@
 ## IDF Component Manager Manifest File
 dependencies:
-  ## Required IDF version for multi-target support (ESP32-S3, C3, C5, C6, S2, P4)
+  ## Required IDF version for multi-target support (ESP32-S3, C3, C5, C6, S2, P4, S31)
   idf:
     version: '>=6.1.0'
 
@@ -16,4 +16,4 @@ dependencies:
   espressif/esp_tinyusb:
     version: '^1.7.2'
     rules:
-      - if: "target in [esp32s2, esp32s3, esp32p4]"
+      - if: "target in [esp32s2, esp32s3, esp32p4, esp32s31]"
