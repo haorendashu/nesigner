@@ -1,0 +1,5 @@
+version: "0.8.1"
+description: "Optimized C library for ECDSA/Schnorr signatures and secret/public key operations on curve secp256k1."
+dependencies:
+  idf:
+    version: ">=5.3.0"

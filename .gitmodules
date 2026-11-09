@@ -1,3 +1,0 @@
-[submodule "components/cJSON"]
-	path = components/cJSON
-	url = git@github.com:haorendashu/cJSON.git
