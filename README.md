@@ -110,6 +110,40 @@ idf.py menuconfig
 ```
 Navigate to `nesigner Hardware & Transport Configuration` to choose between TinyUSB CDC-ACM, USB Serial/JTAG, or UART, and customize UART pins or buffer sizes.
 
+### Multi-Target Firmware Packaging & Web Flashing
+
+A dedicated packaging tool `tools/package_firmware.py` automates compiling across multiple targets, isolating builds to avoid cache collisions, extracting split binaries, assembling full-image unified binaries (`nesigner_merged.bin`), and producing a `manifest.json` for web flashers.
+
+```bash
+# Activate ESP-IDF environment first
+. $HOME/esp/esp-idf/export.sh
+
+# 1. Build and package all supported targets:
+python3 tools/package_firmware.py --all
+
+# 2. Or build and package specific targets:
+python3 tools/package_firmware.py --target esp32s3 esp32c3
+
+# 3. Package already built targets without recompiling:
+python3 tools/package_firmware.py --target esp32s3 esp32c3 --package-only
+
+# 4. Custom output directory and release version:
+python3 tools/package_firmware.py --all --output-dir dist --version 0.3.0
+```
+
+Output directory structure (`dist/v<version>/`):
+```text
+dist/v0.3.0/
+  ├── manifest.json              # Web flasher index (targets, chips, offsets, paths)
+  ├── esp32s3/
+  │    ├── bootloader.bin        (0x0)
+  │    ├── partition-table.bin   (0x8000)
+  │    ├── nesigner.bin          (0x10000)
+  │    ├── nesigner_merged.bin   (0x0 unified binary)
+  │    └── flasher_args.json
+  └── esp32c3/ ...
+```
+
 ### Linux Permissions (udev rules)
 
 To allow non-root access to the USB serial interfaces, create `/etc/udev/rules.d/99-nesigner.rules`:
