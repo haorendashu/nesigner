@@ -160,24 +160,38 @@ def build_target(repo_root: Path, target: str, build_dir: Path, clean: bool = Fa
 
     build_dir.mkdir(parents=True, exist_ok=True)
 
+    target_sdkconfig = build_dir / "sdkconfig"
+
     stdout_mode = None if verbose else subprocess.PIPE
     stderr_mode = None if verbose else subprocess.PIPE
 
-    # Check if target already set in build directory
+    # Check if target already set and configured in build directory
     cmake_cache = build_dir / "CMakeCache.txt"
     needs_set_target = True
-    if cmake_cache.is_file():
+    if cmake_cache.is_file() and target_sdkconfig.is_file():
         try:
             with open(cmake_cache, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-                if f'IDF_TARGET:STRING={target}' in content:
-                    needs_set_target = False
+                cache_content = f.read()
+            with open(target_sdkconfig, "r", encoding="utf-8", errors="ignore") as f:
+                sdkconfig_content = f.read()
+
+            if (
+                f'IDF_TARGET:STRING={target}' in cache_content
+                and f'CONFIG_IDF_TARGET="{target}"' in sdkconfig_content
+            ):
+                needs_set_target = False
         except Exception:
             needs_set_target = True
 
     if needs_set_target:
-        print(f"Setting IDF target to {target}...")
-        set_target_cmd = ["idf.py", "-B", str(build_dir), "set-target", target]
+        print(f"Setting IDF target to {target} (isolated sdkconfig: {target_sdkconfig})...")
+        set_target_cmd = [
+            "idf.py",
+            "--preview",
+            "-B", str(build_dir),
+            "-D", f"SDKCONFIG={target_sdkconfig}",
+            "set-target", target,
+        ]
         proc = subprocess.run(set_target_cmd, cwd=repo_root, stdout=stdout_mode, stderr=stderr_mode, text=True)
         if proc.returncode != 0:
             if not verbose and proc.stderr:
@@ -185,7 +199,13 @@ def build_target(repo_root: Path, target: str, build_dir: Path, clean: bool = Fa
             raise RuntimeError(f"idf.py set-target {target} failed with exit code {proc.returncode}")
 
     print(f"Compiling {target}...")
-    build_cmd = ["idf.py", "-B", str(build_dir), "build"]
+    build_cmd = [
+        "idf.py",
+        "--preview",
+        "-B", str(build_dir),
+        "-D", f"SDKCONFIG={target_sdkconfig}",
+        "build",
+    ]
     proc = subprocess.run(build_cmd, cwd=repo_root, stdout=stdout_mode, stderr=stderr_mode, text=True)
     if proc.returncode != 0:
         if not verbose and proc.stderr:
@@ -339,6 +359,12 @@ Examples:
         help="Root output directory (default: 'dist')",
     )
     parser.add_argument(
+        "--build-batch-dir",
+        type=str,
+        default="build_batch",
+        help="Root directory for batch build artifacts (default: 'build_batch')",
+    )
+    parser.add_argument(
         "--version",
         "-v",
         type=str,
@@ -368,11 +394,13 @@ Examples:
     version = get_version(repo_root, args.version)
     out_root = Path(args.output_dir) if os.path.isabs(args.output_dir) else repo_root / args.output_dir
     version_dir = out_root / f"v{version}"
+    batch_root = Path(args.build_batch_dir) if os.path.isabs(args.build_batch_dir) else repo_root / args.build_batch_dir
 
     print(f"nesigner Firmware Packaging Tool")
     print(f"================================")
     print(f"Repository Root : {repo_root}")
     print(f"Version         : v{version}")
+    print(f"Batch Build Dir : {batch_root}")
     print(f"Output Directory: {version_dir}")
     print(f"Targets Selected: {', '.join(targets)}")
     print(f"Mode            : {'Package only' if args.package_only else 'Build and package'}")
@@ -383,8 +411,8 @@ Examples:
     target_manifests = []
 
     for target in targets:
-        # Check if build_<target> exists, fallback to build if build/flasher_args.json matches target
-        build_dir = repo_root / f"build_{target}"
+        # Check if batch build directory exists, fallback to build if build/flasher_args.json matches target
+        build_dir = batch_root / target
         if not build_dir.exists() and args.package_only:
             default_build = repo_root / "build"
             if default_build.exists() and (default_build / "flasher_args.json").is_file():
